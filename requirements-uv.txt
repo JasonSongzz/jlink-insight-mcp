@@ -1,0 +1,2 @@
+# Install dependencies from the authoritative project metadata.
+-e .

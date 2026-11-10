@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "jlink-insight": {
+      "command": "C:/tools/jlink-insight-mcp/.venv/Scripts/python.exe",
+      "args": ["-m", "jlink_mcp"],
+      "env": {
+        "JLINK_DEFAULT_INTERFACE": "SWD"
+      }
+    }
+  }
+}

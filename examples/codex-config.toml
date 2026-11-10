@@ -1,0 +1,11 @@
+# Merge into ~/.codex/config.toml and replace the executable path.
+[mcp_servers.jlink-insight]
+command = 'C:\tools\jlink-insight-mcp\.venv\Scripts\python.exe'
+args = ["-m", "jlink_mcp"]
+startup_timeout_sec = 30
+tool_timeout_sec = 300
+
+[mcp_servers.jlink-insight.env]
+JLINK_DEFAULT_INTERFACE = "SWD"
+# Optional: directory containing your MCU's CMSIS-SVD files.
+# JLINK_SVD_DIR = 'C:\tools\svd'

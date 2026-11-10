@@ -1,0 +1,6 @@
+{
+  "ioc": "demo.ioc",
+  "chip_name": "STM32F407VG",
+  "firmware": "build/Debug/demo.elf",
+  "flash_address": "0x08000000"
+}

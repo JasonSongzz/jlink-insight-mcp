@@ -1,0 +1,162 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "jlink-insight-mcp"
+version = "0.2.0"
+description = "JLink Insight MCP: project-aware firmware deployment, debugging and RTOS runtime analysis"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+authors = [
+    {name = "cyj0920", email = "cyjie0920@gmail.com"}
+]
+keywords = ["mcp", "jlink", "debugger", "segger", "embedded", "mcu"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Debuggers",
+    "Topic :: System :: Hardware",
+]
+
+dependencies = [
+    "pylink-square>=2.0.0",
+    "pyelftools>=0.32",
+    "intelhex>=2.3.0",
+    "mcp>=1.26.0",
+    "numpy>=1.26.0",
+    "pydantic>=2.12.0",
+    "pydantic-settings>=2.12.0",
+    "openai>=1.0.0",  # For semantic tool discovery embeddings
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-benchmark>=4.0.0",
+    "pytest-asyncio>=0.23.0",
+    "black>=24.0.0",
+    "ruff>=0.1.0",
+    "mypy>=1.8.0",
+]
+
+[project.scripts]
+jlink-insight-mcp = "jlink_mcp.server:main"
+jlink-mcp = "jlink_mcp.server:main"
+
+[project.urls]
+Upstream = "https://github.com/cyj0920/jlink_mcp"
+
+# UV 配置
+[tool.uv]
+# 包索引
+index-url = "https://pypi.org/simple"
+# 默认安装开发依赖
+default-groups = ["dev"]
+
+[tool.uv.pip]
+# pip 兼容模式配置
+generate-hashes = false
+
+# UV 开发依赖组（替代 [project.optional-dependencies].dev）
+[dependency-groups]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+    "pytest-benchmark>=4.0.0",
+    "pytest-cov>=4.1.0",
+    "black>=24.0.0",
+    "ruff>=0.1.0",
+    "mypy>=1.8.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/jlink_mcp"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "/src",
+    "/docs",
+    "/examples",
+    "/tests",
+    "/AGENTS.md",
+    "/NOTICE.md",
+    "/CHANGELOG.md",
+    "/LICENSE",
+    "/README.md",
+]
+
+[tool.black]
+line-length = 120
+target-version = ["py310", "py311", "py312"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+select = ["E", "F", "I", "N", "W", "UP"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.10"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+
+# Pytest 配置
+[tool.pytest.ini_options]
+testpaths = ["tests/unit", "tests/mock"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+minversion = "8.0"
+asyncio_default_fixture_loop_scope = "function"
+addopts = [
+    "-v",
+    "--strict-markers",
+    "--tb=short",
+    "--cov=src/jlink_mcp",
+    "--cov-report=html",
+    "--cov-report=term-missing",
+    "--cov-fail-under=60",
+    "-m", "not integration and not performance and not benchmark",
+]
+markers = [
+    "unit: 单元测试（不依赖硬件）",
+    "integration: 集成测试（需要硬件）",
+    "mock: Mock 测试",
+    "slow: 慢速测试",
+    "svd: SVD 相关测试",
+    "memory: 内存操作测试",
+    "flash: Flash 操作测试",
+    "rtt: RTT 测试",
+    "gdb: GDB Server 测试",
+    "connection: 连接管理测试",
+    "device_info: 设备信息测试",
+    "benchmark: 性能基准测试（使用 pytest-benchmark）",
+    "performance: 性能测试",
+]
+
+# Coverage 配置
+[tool.coverage.run]
+source = ["src/jlink_mcp"]
+omit = [
+    "*/tests/*",
+    "*/__pycache__/*",
+    "*/site-packages/*",
+    "*/venv/*",
+    "*/.venv/*",
+]
+
+[tool.coverage.report]
+precision = 2
+skip_covered = false
+show_missing = true
+
+[tool.coverage.html]
+directory = "htmlcov"
