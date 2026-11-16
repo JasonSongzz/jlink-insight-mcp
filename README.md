@@ -89,7 +89,7 @@ python setup_mcp.py
 
 ```powershell
 py -3.12 -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -e .
+.\.venv\Scripts\python.exe -m pip install --no-cache-dir .
 .\.venv\Scripts\python.exe -m jlink_mcp
 ```
 
@@ -97,13 +97,17 @@ Linux / macOS：
 
 ```bash
 python3 -m venv .venv
-.venv/bin/python -m pip install -e .
+.venv/bin/python -m pip install --no-cache-dir .
 .venv/bin/python -m jlink_mcp
 ```
 
 最后一条命令启动 stdio MCP 服务，等待客户端请求，不能把它当交互式命令行输入 Python 函数。通常由客户端直接启动，无需手动运行。
 
 安装后的新命令为 `jlink-insight-mcp`，兼容命令 `jlink-mcp` 也保留。Python 包路径仍为 `jlink_mcp`。
+
+> 手工安装的两条纪律：**必须带 `--no-cache-dir`**（pip 缓存写入在部分环境下会挂起），
+> **不要加 `-e`**（editable 元数据生成在部分 hatchling/pip 组合下会卡住）。
+> 只有在需要「改源码即时生效」时才用 `python setup_mcp.py --editable`。
 
 > ⚠️ 依赖里的 `mcp` 必须 `<2`：本包使用 `mcp.server.fastmcp`，`mcp` 2.x 已将其改名为 `MCPServer`，
 > 装上 2.x 会在启动时抛 `ModuleNotFoundError: No module named 'mcp.server.fastmcp'`。
@@ -250,9 +254,12 @@ gdb_batch(project_path, commands=["bt"])          # 需要符号级回溯时
 ## 测试与开发
 
 ```bash
-python -m pip install -e ".[dev]"
+python -m pip install --no-cache-dir ".[dev]"
 python -m pytest
 ```
+
+> 需要边改源码边跑测试时改用 editable：`python setup_mcp.py --dev --editable`
+> （editable 元数据生成在部分环境会挂起，见上文说明）。
 
 默认排除真实硬件集成及性能测试。显式运行全部单元与 Mock 测试（包括测试目录中的微基准）可用：
 

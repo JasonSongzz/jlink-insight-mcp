@@ -194,7 +194,7 @@ iflow
 
 **解决：**
 1. 手动测试：`python -m jlink_mcp`
-2. 检查依赖是否完整：`pip install -e .`
+2. 检查依赖是否完整：`python setup_mcp.py --check`（或 `python -m pip install --no-cache-dir .`）
 3. 查看错误日志
 
 ---

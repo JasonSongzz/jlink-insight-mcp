@@ -11,6 +11,7 @@ Python 3.10+, FastMCP, pylink-square, pyelftools, intelhex. Keep upstream MIT at
 - Keep binary RTT separate from text logs. Lost or malformed trace must reduce confidence, not fabricate execution history.
 - Diagnostic findings must include evidence and observation scope. Threshold warnings do not prove a deadlock or system correctness.
 - Keep work queues, raw bytes, event windows and report payloads bounded. Stop workers and release resources on shutdown.
-- Tests: python -m pip install -e ".[dev]"; python -m pytest. Hardware tests are opt-in and require a selected board.
+- Tests: `python setup_mcp.py --dev` (or `python -m pip install --no-cache-dir ".[dev]"`), then `python -m pytest`. Hardware tests are opt-in and require a selected board.
+- Installer constraints: never run `pip install --upgrade pip` (hangs on some networks); always pass `--no-cache-dir` (cache writes can hang); avoid editable installs except with `--editable` for source iteration.
 - New module/public function docstrings should explain English / 中文 intent; use type annotations.
 - Do not claim hardware validation from mocks. Update docs and validation notes when behavior changes.

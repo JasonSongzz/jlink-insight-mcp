@@ -31,12 +31,21 @@
 
 ## 使用
 
-先在已安装 J-Link 软件的主机上安装修改版：
+先在已安装 J-Link 软件的主机上安装：
 
 ```bash
-python -m pip install -e .
+# 推荐：一键安装（建 venv + 装依赖 + 自检 + 打印客户端配置）
+python setup_mcp.py --mirror https://pypi.tuna.tsinghua.edu.cn/simple
+
+# 或手动（注意必须带 --no-cache-dir，且不要加 -e）
+python -m pip install --no-cache-dir .
+
+# 启动 stdio 服务（通常由 MCP 客户端拉起）
 python -m jlink_mcp
 ```
+
+> `pip install -e .` 在部分 hatchling/pip 组合下会卡在 editable 元数据生成；
+> 只有需要改源码即时生效时才用 `python setup_mcp.py --editable`。
 
 通过 MCP 连接开发板，运行已集成 SystemView 的固件。以下为工具参数示例，工具由 MCP 客户端调用：
 

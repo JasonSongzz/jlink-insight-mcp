@@ -7,7 +7,7 @@
 ### 环境准备
 
 - [ ] Python 3.10+ 已安装
-- [ ] 项目依赖已安装 (`pip install -e .`)
+- [ ] 项目依赖已安装（`python setup_mcp.py` 或 `python -m pip install --no-cache-dir .`）
 - [ ] pytest 已安装
 - [ ] JLink 驱动已安装
 - [ ] JLink 调试器已连接 USB
@@ -192,7 +192,11 @@ pytest tests/integration/ -v -m integration
 ### 导入错误
 
 ```bash
-pip install -e .
+# 先自检缺什么
+python setup_mcp.py --check
+
+# 补齐依赖（不要加 -e；缓存写入在部分环境会挂起）
+python -m pip install --no-cache-dir .
 ```
 
 ### 设备未找到
