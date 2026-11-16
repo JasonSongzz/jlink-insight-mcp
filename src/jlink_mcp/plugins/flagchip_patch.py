@@ -60,7 +60,12 @@ class FlagchipPatch(DevicePatchInterface):
     def _load_devices(self) -> None:
         """从 XML 文件加载设备信息."""
         if not self._patch_path.exists():
-            logger.warning(f"Flagchip 补丁文件不存在: {self._patch_path}")
+            # 包内默认没有随附 JLinkDevices.xml；这是可选厂商补丁，不是错误。
+            # 仅当用户显式配置了 JLINK_PATCH_DIR 时才值得告警。
+            if config_manager.get_config().patch_dir or os.environ.get("JLINK_PATCH_DIR"):
+                logger.warning(f"Flagchip 补丁文件不存在: {self._patch_path}")
+            else:
+                logger.debug(f"未随附 Flagchip 补丁文件（可选）: {self._patch_path}")
             return
 
         try:

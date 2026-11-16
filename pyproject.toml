@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "jlink-insight-mcp"
-version = "0.2.0"
+version = "0.3.0"
 description = "JLink Insight MCP: project-aware firmware deployment, debugging and RTOS runtime analysis"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -51,6 +51,8 @@ dev = [
 [project.scripts]
 jlink-insight-mcp = "jlink_mcp.server:main"
 jlink-mcp = "jlink_mcp.server:main"
+# CI/CD 用的确定性命令行入口（不需要 LLM 或 MCP 客户端）
+jlink-ci = "jlink_mcp.cli:main"
 
 [project.urls]
 Upstream = "https://github.com/cyj0920/jlink_mcp"
@@ -104,6 +106,10 @@ target-version = ["py310", "py311", "py312"]
 [tool.ruff]
 line-length = 120
 target-version = "py310"
+
+[tool.ruff.lint]
+# 存量代码尚有历史告警；CI 只对 workflow/CLI 相关新文件做强制门禁，
+# 全量整治作为独立任务推进。
 select = ["E", "F", "I", "N", "W", "UP"]
 ignore = ["E501"]
 

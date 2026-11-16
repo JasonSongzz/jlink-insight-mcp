@@ -108,7 +108,12 @@ class SVDManager:
     def _scan_svd_files(self) -> None:
         """扫描 SVD 目录，建立设备名到文件的映射（不解析内容）."""
         if not self._svd_path.exists():
-            logger.warning(f"SVD 目录不存在: {self._svd_path}")
+            # 包内默认不随附 SVD（体积/授权原因）。未配置 JLINK_SVD_DIR 时
+            # 属于正常状态，不应在每次启动和 CI 日志里告警。
+            if os.environ.get("JLINK_SVD_DIR") or config_manager.get_config().svd_dir:
+                logger.warning(f"SVD 目录不存在: {self._svd_path}")
+            else:
+                logger.debug(f"未配置 SVD 目录（可选）: {self._svd_path}")
             return
 
         svd_files = list(self._svd_path.glob("*.svd"))

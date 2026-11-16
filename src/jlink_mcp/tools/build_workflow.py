@@ -23,17 +23,37 @@ import hashlib
 import json
 import os
 import platform
+import re
 import shutil
+import signal
 import socket
 import subprocess
 import sys
+import threading
 import time
+from collections.abc import Callable
 from functools import wraps
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from ..project_inspector import inspect_project_data
 from ..utils import logger
+
+# 响应结构版本：CI 侧可据此做稳定解析；结构变更时递增。
+SCHEMA_VERSION = 1
+
+# 环境变量中属于「凭据」的名字特征（与 dsh-mcp-client 的清洗规则保持一致）。
+_SECRET_NAME = re.compile(r"KEY|PASSWORD|SECRET|TOKEN", re.IGNORECASE)
+
+# 同一个工程目录的构建/测试必须串行，否则 ninja 会在同一 build 目录互相踩踏。
+_PROJECT_LOCKS: dict[str, threading.Lock] = {}
+_PROJECT_LOCKS_GUARD = threading.Lock()
+
+# GDB 中可以在**宿主机**上执行任意代码/读写的命令：直接拒绝，而不是静默丢弃。
+_DANGEROUS_GDB_PREFIXES = (
+    "shell", "python", "source", "!", "dump", "restore", "define", "while",
+    "set logging", "set debuginfod",
+)
 
 # ---------------------------------------------------------------------------
 # Response wrapper / 统一响应包装
@@ -44,10 +64,33 @@ def _response(func: Callable[..., Any]) -> Callable[..., dict[str, Any]]:
     @wraps(func)
     def wrapped(*args: Any, **kwargs: Any) -> dict[str, Any]:
         try:
-            return {"success": True, "data": func(*args, **kwargs)}
+            return {"schema_version": SCHEMA_VERSION, "success": True, "data": func(*args, **kwargs)}
         except Exception as exc:  # noqa: BLE001 - 工具边界必须把异常变成结构化结果
             logger.exception("build workflow error in %s", func.__name__)
-            return {"success": False, "error": {"description": str(exc)}}
+            return {
+                "schema_version": SCHEMA_VERSION,
+                "success": False,
+                "error": {"description": str(exc), "type": type(exc).__name__},
+            }
+
+    return wrapped
+
+
+def _serialized(func: Callable[..., Any]) -> Callable[..., Any]:
+    """Serialize per-project build/test operations / 同一工程串行执行.
+
+    ninja/cmake 共享同一个 build 目录；两个 Agent 会话并发调用会互相破坏
+    build graph。锁的粒度是工程根目录，不同工程仍可并行。
+    """
+
+    @wraps(func)
+    def wrapped(project_path: str, *args: Any, **kwargs: Any) -> Any:
+        root = Path(project_path).expanduser().resolve()
+        key = str(root)
+        with _PROJECT_LOCKS_GUARD:
+            lock = _PROJECT_LOCKS.setdefault(key, threading.Lock())
+        with lock:
+            return func(project_path, *args, **kwargs)
 
     return wrapped
 
@@ -359,50 +402,102 @@ def _sha256(path: Path) -> str:
     return h.hexdigest()
 
 
+def _kill_tree(proc: subprocess.Popen) -> None:
+    """Kill the whole process tree / 终止整棵进程树.
+
+    ``subprocess.run(timeout=)`` 只杀直接子进程；ninja/cmake 会派发
+    arm-none-eabi-gcc 等孙进程，超时后它们会变成孤儿并锁住 build 目录。
+    """
+    try:
+        if os.name == "nt":
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                timeout=20,
+                shell=False,
+            )
+        else:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+    except Exception:  # noqa: BLE001 - 清理路径必须尽力而为
+        try:
+            proc.kill()
+        except Exception:  # noqa: BLE001
+            pass
+
+
 def _run(argv: list[str], cwd: Path, env: dict[str, str], timeout: int) -> dict[str, Any]:
     """Run a subprocess safely / 安全执行子进程.
 
-    MCP 服务的 stdin 是 JSON-RPC 管道且常开；子进程必须显式 ``stdin=DEVNULL``，
-    否则 cmake configure 里由 ``execute_process`` 派生的孙进程可能继承该管道并阻塞。
-    stdout/stderr 全部 capture，绝不打印到协议通道。
+    三条硬约束：
+    1. ``stdin=DEVNULL``：MCP 的 stdin 是常开的 JSON-RPC 管道，子进程继承后
+       cmake configure 里由 ``execute_process`` 派生的孙进程会永久阻塞。
+    2. stdout/stderr 全部 capture，绝不打印到协议通道。
+    3. 超时按**进程树**终止，避免孤儿进程锁住 build 目录。
     """
     t0 = time.monotonic()
+    popen_kwargs: dict[str, Any] = {
+        "cwd": str(cwd),
+        "env": env,
+        "stdin": subprocess.DEVNULL,
+        "stdout": subprocess.PIPE,
+        "stderr": subprocess.PIPE,
+        "text": True,
+        "encoding": "utf-8",
+        "errors": "replace",
+        "shell": False,
+    }
+    if os.name != "nt":
+        popen_kwargs["start_new_session"] = True  # 便于 killpg 整棵树
     try:
-        p = subprocess.run(
-            argv,
-            cwd=str(cwd),
-            env=env,
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=timeout,
-            shell=False,
-        )
-        return {
-            "argv": argv,
-            "returncode": p.returncode,
-            "stdout": (p.stdout or "")[-12000:],
-            "stderr": (p.stderr or "")[-12000:],
-            "elapsed_s": round(time.monotonic() - t0, 2),
-        }
-    except subprocess.TimeoutExpired as exc:
-        out = exc.stdout
-        if isinstance(out, bytes):
-            out = out.decode("utf-8", "replace")
+        proc = subprocess.Popen(argv, **popen_kwargs)
+    except OSError as exc:
         return {
             "argv": argv,
             "returncode": None,
-            "stdout": (out or "")[-4000:],
-            "stderr": f"TIMEOUT after {timeout}s",
+            "stdout": "",
+            "stderr": f"SPAWN FAILED: {exc}",
             "elapsed_s": round(time.monotonic() - t0, 2),
+            "timed_out": False,
         }
+
+    timed_out = False
+    try:
+        out, err = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        _kill_tree(proc)
+        try:
+            out, err = proc.communicate(timeout=15)
+        except subprocess.TimeoutExpired:
+            out, err = "", ""
+    return {
+        "argv": argv,
+        "returncode": proc.returncode,
+        "stdout": (out or "")[-12000:],
+        "stderr": (err or "")[-12000:] if not timed_out else f"TIMEOUT after {timeout}s (process tree killed)",
+        "elapsed_ms": int((time.monotonic() - t0) * 1000),
+        "elapsed_s": round(time.monotonic() - t0, 2),
+        "timed_out": timed_out,
+    }
 
 
 def _build_env(discovery: dict[str, Any], build_cfg: dict[str, Any]) -> dict[str, str]:
-    """Compose child env / 组装子进程环境：把工具链目录加进 PATH。"""
-    env = dict(os.environ)
+    """Compose child env / 组装子进程环境.
+
+    默认从父环境继承，但会**剔除以凭据命名的变量**（KEY/PASSWORD/SECRET/TOKEN）
+    与 DSH_* —— 构建脚本、CMake 的 execute_process、测试程序都不应该看到 CI 密钥。
+    需要显式传回时用 manifest ``build.env_allow`` 列名单，或 ``build.env`` 赋值。
+    """
+    allow = build_cfg.get("env_allow", [])
+    allow_set = {str(x) for x in allow} if isinstance(allow, list) else set()
+    env: dict[str, str] = {}
+    for k, v in os.environ.items():
+        if k.startswith("DSH_"):
+            continue
+        if _SECRET_NAME.search(k) and k not in allow_set:
+            continue
+        env[k] = v
     extra = build_cfg.get("env", {})
     if isinstance(extra, dict):
         for k, v in extra.items():
@@ -524,6 +619,7 @@ def _host_test_names(script: Path) -> list[str]:
 
 
 @_response
+@_serialized
 def host_test(
     project_path: str,
     script: str | None = None,
@@ -707,6 +803,7 @@ def build_status(project_path: str, preset: str = "Debug") -> dict[str, Any]:
 
 
 @_response
+@_serialized
 def build_project(
     project_path: str,
     preset: str = "Debug",
@@ -970,8 +1067,11 @@ def gdb_batch(
 
     Spawns JLinkGDBServer if the port is free, waits for it, runs
     ``arm-none-eabi-gdb -batch -ex ... <elf>``, then terminates the server it started.
-    Use for backtrace / registers / memory / disassembly without VSCode.
-    Stop any runtime monitor first (hardware is exclusive).
+
+    Safety / 安全约束:
+    * 持有 ``hardware_access`` 独占租约，避免与 runtime monitor / deploy 抢硬件。
+    * 拒绝可在宿主机执行代码或读写文件的 GDB 命令（shell / python / source /
+      dump / restore / define / while 等）。
     """
     root = _root(project_path)
     cfg = _build_cfg(root)
@@ -1006,56 +1106,70 @@ def gdb_batch(
         "bt",
         "info registers",
     ])
-    # 禁止通过 GDB 拉起宿主 shell（避免命令注入面）
-    cmds = [c for c in cmds if not c.strip().lower().startswith("shell ")]
-
-    started_server = False
-    proc: subprocess.Popen | None = None
-    if not _port_open(port):
-        argv = [
-            server["path"],
-            "-device", str(chip),
-            "-if", interface,
-            "-speed", "4000",
-            "-port", str(port),
-            "-singlerun",
-        ]
-        try:
-            proc = subprocess.Popen(
-                argv,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                stdin=subprocess.DEVNULL,
-                shell=False,
-            )
-            started_server = True
-        except OSError as exc:
-            raise RuntimeError(f"Failed to start J-Link GDB Server: {exc}") from exc
-        deadline = time.monotonic() + 20
-        while time.monotonic() < deadline and not _port_open(port):
-            if proc.poll() is not None:
-                raise RuntimeError("J-Link GDB Server exited before listening")
-            time.sleep(0.3)
-        if not _port_open(port):
-            raise RuntimeError("J-Link GDB Server did not open the port in time")
-
-    gdb_argv = [gdb["path"], "-q", "-batch"]
+    # 拒绝而非静默丢弃：调用方必须知道某条命令没有执行
     for c in cmds:
-        gdb_argv += ["-ex", c]
-    gdb_argv.append(str(elf))
-    env = _build_env(disco, cfg)
-    try:
-        result = _run(gdb_argv, root, env, timeout_s)
-    finally:
-        if started_server and proc is not None:
+        low = c.strip().lower()
+        for bad in _DANGEROUS_GDB_PREFIXES:
+            if low == bad or low.startswith(bad + " ") or low.startswith(bad + "("):
+                raise ValueError(
+                    f"GDB command not allowed (host code execution / file IO): {c!r}"
+                )
+
+    # 与其它硬件操作互斥
+    from ..hardware_access import hardware_access
+    from ..runtime_monitor import runtime_monitor
+
+    if runtime_monitor.status(0).get("state") in ("starting", "running"):
+        raise RuntimeError("Runtime monitor is active; call stop_runtime_monitor first")
+
+    with hardware_access():
+        started_server = False
+        proc: subprocess.Popen | None = None
+        if not _port_open(port):
+            argv = [
+                server["path"],
+                "-device", str(chip),
+                "-if", interface,
+                "-speed", "4000",
+                "-port", str(port),
+                "-singlerun",
+            ]
             try:
-                proc.terminate()
-                proc.wait(timeout=5)
-            except Exception:
+                proc = subprocess.Popen(
+                    argv,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    stdin=subprocess.DEVNULL,
+                    shell=False,
+                )
+                started_server = True
+            except OSError as exc:
+                raise RuntimeError(f"Failed to start J-Link GDB Server: {exc}") from exc
+            deadline = time.monotonic() + 20
+            while time.monotonic() < deadline and not _port_open(port):
+                if proc.poll() is not None:
+                    raise RuntimeError("J-Link GDB Server exited before listening")
+                time.sleep(0.3)
+            if not _port_open(port):
+                raise RuntimeError("J-Link GDB Server did not open the port in time")
+
+        gdb_argv = [gdb["path"], "-q", "-batch"]
+        for c in cmds:
+            gdb_argv += ["-ex", c]
+        gdb_argv.append(str(elf))
+        env = _build_env(disco, cfg)
+        try:
+            result = _run(gdb_argv, root, env, timeout_s)
+        finally:
+            if started_server and proc is not None:
                 try:
-                    proc.kill()
-                except Exception:
-                    pass
+                    proc.terminate()
+                    proc.wait(timeout=5)
+                except Exception:  # noqa: BLE001
+                    try:
+                        proc.kill()
+                    except Exception:  # noqa: BLE001
+                        pass
 
     return {
         "elf": str(elf),

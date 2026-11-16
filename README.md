@@ -260,6 +260,29 @@ build → host_test(-O0, -O3) → flash → observe
 
 这套设计的意义：**逻辑回归永远到不了板子**。host 测试是秒级的，而烧录 + 上台架验证是分钟级且有硬件损耗。
 
+## CI/CD：`jlink-ci` 命令行入口
+
+CI 里没有 LLM 也没有 MCP 客户端，所以提供了确定性命令行入口，用**退出码**表达结果：
+
+```bash
+jlink-ci status   --project .                 # 工具链 / ELF / host 测试就绪情况
+jlink-ci verify   --project .                 # build + host tests（无硬件，CI 门禁）
+jlink-ci flash    --project . --chip STM32U575RG --confirm   # 真实写 Flash
+jlink-ci pipeline --project . --flash --confirm --observe 30 # 全链路
+jlink-ci debug    --project . --cmd bt        # 一次性符号级调试
+```
+
+| 退出码 | 含义 |
+|---|---|
+| `0` | 成功 |
+| `1` | 执行失败（编译 / 测试 / 烧录） |
+| `2` | 用法或配置错误（缺参数、未带 `--confirm`） |
+
+`--json` 输出结构化证据（含 `schema_version`、ELF SHA256、`failing_tests`），可直接存成 CI 工件。
+
+无硬件 job 只需要 cmake/ninja/arm-none-eabi-gcc + 宿主编译器；烧录 job 放 self-hosted runner。
+完整示例（GitHub Actions / self-hosted / 并发串行化）见 [docs/CI_INTEGRATION.md](docs/CI_INTEGRATION.md)。
+
 **可移植性**：工具链按 `manifest → EMBEDDED_* 环境变量 → PATH → arm-none-eabi-gcc 兄弟目录 → 常见安装目录`
 五级解析，代码中没有任何机器专属路径。换机器只设环境变量：
 

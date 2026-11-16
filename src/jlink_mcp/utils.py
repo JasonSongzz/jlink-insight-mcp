@@ -1,11 +1,15 @@
 """JLink MCP Utility Functions / JLink MCP 工具函数."""
 
 import logging
+import os
 from typing import Optional
 
 
 def setup_logging(level: int = logging.INFO) -> logging.Logger:
     """配置日志记录器.
+
+    可用环境变量 ``JLINK_LOG_LEVEL``（DEBUG/INFO/WARNING/ERROR）覆盖级别，
+    CI 里通常设为 WARNING 保持输出干净。
 
     Args:
         level: 日志级别，默认为 INFO
@@ -13,6 +17,11 @@ def setup_logging(level: int = logging.INFO) -> logging.Logger:
     Returns:
         配置好的 Logger 实例
     """
+    env_level = os.environ.get("JLINK_LOG_LEVEL", "").strip().upper()
+    if env_level:
+        resolved = getattr(logging, env_level, None)
+        if isinstance(resolved, int):
+            level = resolved
     logging.basicConfig(
         level=level,
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",

@@ -319,3 +319,96 @@ def test_pipeline_proceeds_when_host_test_passes(project: Path, monkeypatch) -> 
     stage = next(s for s in data["stages"] if s["name"] == "host_test")
     assert stage["result"]["data"]["ok"] is True
 
+
+# ---------------------------------------------------------------------------
+# Hardening / 加固行为
+# ---------------------------------------------------------------------------
+
+
+def test_response_carries_schema_version() -> None:
+    """所有工具响应带 schema_version，CI 侧可稳定解析。"""
+    ok = bw.toolchain_detect()
+    assert ok["schema_version"] == bw.SCHEMA_VERSION
+    bad = bw.build_status("/definitely/not/a/project")
+    assert bad["schema_version"] == bw.SCHEMA_VERSION
+    assert bad["success"] is False
+    assert bad["error"]["type"] == "ValueError"
+
+
+def test_build_env_strips_secret_variables(project: Path, monkeypatch) -> None:
+    """构建子进程不应继承 CI 密钥。"""
+    monkeypatch.setenv("GITHUB_TOKEN", "ghp_secret")
+    monkeypatch.setenv("MY_API_KEY", "k")
+    monkeypatch.setenv("DB_PASSWORD", "p")
+    monkeypatch.setenv("DSH_INTERNAL", "x")
+    monkeypatch.setenv("HARMLESS_VAR", "ok")
+    env = bw._build_env({"tools": {}}, {})
+    assert "GITHUB_TOKEN" not in env
+    assert "MY_API_KEY" not in env
+    assert "DB_PASSWORD" not in env
+    assert "DSH_INTERNAL" not in env
+    assert env["HARMLESS_VAR"] == "ok"
+
+
+def test_build_env_can_allowlist_secret(project: Path, monkeypatch) -> None:
+    monkeypatch.setenv("MY_CUSTOM_TOKEN", "v")
+    env = bw._build_env({"tools": {}}, {"env_allow": ["MY_CUSTOM_TOKEN"]})
+    assert env["MY_CUSTOM_TOKEN"] == "v"
+
+
+def test_build_env_manifest_values_override(project: Path, monkeypatch) -> None:
+    monkeypatch.setenv("CC", "arm-none-eabi-gcc")
+    env = bw._build_env({"tools": {}}, {"env": {"CC": "custom-cc"}})
+    assert env["CC"] == "custom-cc"
+
+
+def _gdb_project(tmp_path: Path) -> Path:
+    (tmp_path / "jlink-project.json").write_text(
+        json.dumps({"chip_name": "STM32F407VG", "firmware": "build/Debug/demo.elf"}),
+        encoding="utf-8",
+    )
+    fw = tmp_path / "build" / "Debug" / "demo.elf"
+    fw.parent.mkdir(parents=True)
+    fw.write_bytes(b"\x7fELF" + b"\x00" * 60)
+    return tmp_path
+
+
+def _fake_discovery(*_a, **_k) -> dict:
+    return {"tools": {"arm_gdb": {"path": "gdb"}, "jlink_gdbserver": {"path": "gdbserver"}}}
+
+
+def test_gdb_batch_rejects_dangerous_commands(tmp_path: Path, monkeypatch) -> None:
+    """能在宿主机执行代码的 GDB 命令必须被拒绝，而不是静默丢弃。"""
+    root = _gdb_project(tmp_path)
+    monkeypatch.setattr(bw, "_discover", _fake_discovery)
+    for bad in ("python import os", "shell dir", "source evil.gdb", "restore x.bin"):
+        r = bw.gdb_batch(str(root), commands=[bad])
+        assert r["success"] is False
+        assert "not allowed" in r["error"]["description"], bad
+
+
+def test_serialized_lock_blocks_concurrent_builds(tmp_path: Path) -> None:
+    """同一工程的构建串行化：两个线程不会同时进入临界区。"""
+    import threading
+    import time
+
+    active = {"now": 0, "max": 0}
+    guard = threading.Lock()
+
+    @bw._serialized
+    def critical(project_path: str) -> None:
+        with guard:
+            active["now"] += 1
+            active["max"] = max(active["max"], active["now"])
+        time.sleep(0.05)
+        with guard:
+            active["now"] -= 1
+
+    threads = [threading.Thread(target=critical, args=(str(tmp_path),)) for _ in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert active["max"] == 1
+
+
