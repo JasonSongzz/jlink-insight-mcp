@@ -9,8 +9,53 @@
 | `toolchain_detect` | 发现 cmake/ninja/arm-none-eabi-*/JLinkGDBServer，报版本与就绪标志 | ❌ | `project_path?` |
 | `build_status` | 盘点 manifest、CMake presets、工具链文件、`compile_commands.json`、ELF SHA256、Flash/RAM 占用 | ❌ | `project_path`, `preset` |
 | `build_project` | configure + build，返回完整编译器输出、warning/error 计数、ELF hash、size | ❌ | `project_path`, `preset`, `clean`, `target`, `timeout_s` |
-| `workflow_pipeline` | build →（可选）flash/校验/运行 →（可选）短时取证 | ⚠️ 默认否 | `flash`, `confirm`, `observe_s` |
+| `host_test` | 用宿主编译器编译并运行工程自带单元测试，双档 -O0/-O3，失败逐用例定位 | ❌ | `project_path`, `script`, `cc`, `opt`, `only`, `timeout_s` |
+| `workflow_pipeline` | build → **host 测试门禁** →（可选）flash/校验/运行 →（可选）短时取证 | ⚠️ 默认否 | `flash`, `confirm`, `observe_s`, `host_test_enabled`, `host_test_opt` |
 | `gdb_batch` | 拉起 JLinkGDBServer + `arm-none-eabi-gdb -batch`，跑一次性命令 | ⚠️ 需独占 | `commands`, `elf_path`, `port` |
+
+## 1.5 Host 单元测试门禁
+
+### 为什么放在 build 与 flash 之间
+
+```
+build（ARM 交叉编译）
+  ↓
+host_test（宿主编译器，秒级，无硬件）
+  ↓ 失败 → 立即返回 ok=false，message 含 "firmware NOT flashed; failing: <用例>"
+flash（真实写 Flash，分钟级，有硬件损耗）
+```
+
+逻辑回归永远到不了板子。相比「烧进去跑一遍才发现」，省掉的是烧录时间、台架占用和误烧风险。
+
+### 探测与调用
+
+| 项 | 规则 |
+|---|---|
+| 驱动脚本 | 自动找 `Tests/run_host_tests.py`（也支持 `tests/`、`test/`、`scripts/`、根目录）；可用 manifest `build.host_test_script` 覆盖 |
+| 宿主编译器 | `build.host_cc` → `EMBEDDED_HOST_CC` → PATH 上的 `gcc` / `clang` / `cc` |
+| 调用协议 | `<python> <driver> --cc <cc> --opt <0\|3> --only <name>`（脚本不支持这些参数时无法集成） |
+| 缺驱动或缺编译器 | 阶段标记 `skipped`，**不阻塞**流水线 |
+| 显式配置了但找不到 | **报错**，不静默回退到 PATH 上另一个编译器 |
+
+### 失败定位
+
+整轮失败后，工具用 AST 读出驱动里 `TESTS = {...}` 的键，逐个 `--only <name>` 重跑，
+返回 `failing_tests` 列表 —— 不用人工二分。
+
+### 双档编译（-O0 / -O3）
+
+同一份逻辑在两个优化等级下行为必须一致。常见能抓到的嵌入式 bug：
+
+- 缺 `volatile`（-O0 里"碰巧能用"，-O3 被优化掉）
+- 未初始化变量读到不同值
+- 依赖求值顺序 / 有符号溢出等 UB
+- 内联后暴露的别名问题
+
+### 限制（写清楚，避免过度信任）
+
+Host 测试只能覆盖硬件无关逻辑。以下仍需目标硬件：STM32 外设时序、DMA 半缓冲覆盖、
+Flash 擦写延迟、NVIC 优先级、真实 ADC 噪声。测试输出里会带这条 note。
+
 
 ## 2. 可移植性：五级工具链解析
 

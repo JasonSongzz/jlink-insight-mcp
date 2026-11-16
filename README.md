@@ -204,7 +204,8 @@ SVD 外设读取可能有硬件副作用，应只请求需要的寄存器，不�
 | `toolchain_detect` | 自动发现 cmake / ninja / arm-none-eabi-* / JLinkGDBServer 及版本 |
 | `build_status` | 盘点 manifest、presets、工具链文件、compile_commands、ELF SHA256 与 Flash/RAM 占用 |
 | `build_project` | configure + build，返回完整编译器输出、warning/error 计数、ELF hash |
-| `workflow_pipeline` | 一次串起 build →（可选）flash/校验/运行 →（可选）短时取证 |
+| `host_test` | 用宿主编译器编译并运行工程自带单元测试（双档 -O0/-O3），失败时逐用例定位 |
+| `workflow_pipeline` | 一次串起 build → **host 测试门禁** →（可选）flash/校验/运行 →（可选）短时取证 |
 | `gdb_batch` | 拉起 JLinkGDBServer + `arm-none-eabi-gdb -batch` 做 `bt`/寄存器/内存/反汇编 |
 
 基础连接、调试、RTT、SVD 等原工具继续保留；可用客户端工具列表查看完整接口。`reset_target` 支持 normal / halt；core-only reset 和范围擦除没有伪造的 pylink 调用。推荐使用 `deploy_project` 完成固件下载，避免手动整片擦除。
@@ -232,6 +233,7 @@ SVD 外设读取可能有硬件副作用，应只请求需要的寄存器，不�
 ```text
 build_status(project_path)                        # 只读：工具链 / presets / ELF / 占用
 build_project(project_path, preset="Debug")       # 编译，拿 ELF SHA256
+host_test(project_path, opt="both")               # 宿主编译器跑单元测试，不碰硬件
 deploy_project(firmware_path=…, chip_name=…)      # 烧录 + 逐字节校验 + 运行
 get_runtime_report() / rtt_read()                 # 取证
 stop_runtime_monitor()                            # 释放硬件
@@ -239,6 +241,24 @@ gdb_batch(project_path, commands=["bt"])          # 需要符号级回溯时
 ```
 
 或者一条 `workflow_pipeline(project_path, flash=True, confirm=True, observe_s=30)` 走完中间三步。
+
+### Host 单元测试门禁（烧录前拦截）
+
+`workflow_pipeline` 在 **build 之后、flash 之前**插了一个 `host_test` 阶段：
+
+```
+build → host_test(-O0, -O3) → flash → observe
+             │
+             └─ 失败 → 直接返回 ok=false，message 写明 "firmware NOT flashed; failing: <用例名>"
+```
+
+- 需要工程里有 host 测试驱动（自动找 `Tests/run_host_tests.py`，可用 manifest `build.host_test_script` 指定）。
+- 需要宿主编译器（`gcc` / `clang` / `cc`，可用 `build.host_cc` 或 `EMBEDDED_HOST_CC` 指定）。
+- **两者缺任一 → 该阶段标记 skipped，不阻塞流水线**（不当成失败）。
+- `host_test_opt="both"`（默认）跑 `-O0` 和 `-O3`，能抓出只在某个优化等级暴露的 UB / 缺 `volatile`。
+- 失败时自动逐个 `--only <name>` 重跑，直接告诉你哪个用例挂了。
+
+这套设计的意义：**逻辑回归永远到不了板子**。host 测试是秒级的，而烧录 + 上台架验证是分钟级且有硬件损耗。
 
 **可移植性**：工具链按 `manifest → EMBEDDED_* 环境变量 → PATH → arm-none-eabi-gcc 兄弟目录 → 常见安装目录`
 五级解析，代码中没有任何机器专属路径。换机器只设环境变量：

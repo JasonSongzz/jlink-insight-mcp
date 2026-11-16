@@ -387,16 +387,52 @@ async def workflow_pipeline(
     serial_number: str | None = None,
     sample_cpu: bool = False,
     timeout_s: int = 600,
+    host_test_enabled: bool = True,
+    host_test_opt: str = "both",
+    host_cc: str | None = None,
 ) -> dict[str, Any]:
-    """One-call build → optional flash/verify/run → optional runtime evidence / 一体化流水线.
+    """One-call build → host tests → optional flash/run → optional evidence / 一体化流水线.
 
     Safe by default: flash=False. flash=True requires confirm=True (real Flash write).
+    host_test_enabled=True runs native unit tests BEFORE any Flash write; the stage
+    is skipped when no driver/compiler exists. host_test_opt="both" runs -O0 and -O3.
     observe_s>0 starts a short monitor, captures one report, then releases hardware.
-    For long observations use deploy_project + get_runtime_report polling.
     """
     return _build_workflow.workflow_pipeline(
-        project_path, preset, flash, confirm, observe_s, chip_name,
-        serial_number, sample_cpu, timeout_s,
+        project_path=project_path,
+        preset=preset,
+        flash=flash,
+        confirm=confirm,
+        observe_s=observe_s,
+        chip_name=chip_name,
+        serial_number=serial_number,
+        sample_cpu=sample_cpu,
+        timeout_s=timeout_s,
+        host_test_enabled=host_test_enabled,
+        host_test_opt=host_test_opt,
+        host_cc=host_cc,
+    )
+
+
+@mcp.tool()
+async def host_test(
+    project_path: str,
+    script: str | None = None,
+    cc: str | None = None,
+    opt: str = "both",
+    only: str | None = None,
+    isolate_failures: bool = True,
+    timeout_s: int = 900,
+) -> dict[str, Any]:
+    """Compile and run host (native) unit tests, no hardware needed / 主机单元测试.
+
+    Runs the project's driver (auto-detected Tests/run_host_tests.py) with a host
+    C compiler. opt="both" runs -O0 and -O3 to catch optimization-sensitive bugs.
+    On failure it re-runs per test with --only to name the failing cases.
+    Use it standalone, or via workflow_pipeline as a pre-flash gate.
+    """
+    return _build_workflow.host_test(
+        project_path, script, cc, opt, only, isolate_failures, timeout_s
     )
 
 

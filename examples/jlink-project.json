@@ -12,7 +12,11 @@
     "configure_args": [],
     "build_args": [],
     "env": {},
-    "toolchain": {}
+    "toolchain": {},
+
+    "_comment_host_test": "Optional. Auto-detected from Tests/run_host_tests.py when omitted. The driver must accept --cc / --opt / --only.",
+    "host_test_script": "Tests/run_host_tests.py",
+    "host_cc": ""
   },
 
   "_comment_toolchain_example": "Uncomment only if auto-discovery fails (e.g. toolchain installed in a nonstandard location). Keys: cmake, ninja, arm_gcc, arm_gdb, arm_size, arm_objcopy, jlink_gdbserver.",

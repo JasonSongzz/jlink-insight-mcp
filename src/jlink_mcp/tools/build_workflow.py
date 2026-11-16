@@ -17,6 +17,7 @@ Design goals / 设计目标
 
 from __future__ import annotations
 
+import ast
 import glob
 import hashlib
 import json
@@ -25,6 +26,7 @@ import platform
 import shutil
 import socket
 import subprocess
+import sys
 import time
 from functools import wraps
 from pathlib import Path
@@ -430,6 +432,191 @@ def _preset_names(presets: dict[str, Any] | None, kind: str) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
+# Host test integration / Host 单元测试集成
+# ---------------------------------------------------------------------------
+
+# 常见 host 测试驱动脚本位置（相对工程根目录）。
+_HOST_TEST_SCRIPTS = (
+    "Tests/run_host_tests.py",
+    "tests/run_host_tests.py",
+    "test/run_host_tests.py",
+    "scripts/run_host_tests.py",
+    "run_host_tests.py",
+)
+
+_HOST_CC_CANDIDATES = ("gcc", "clang", "cc")
+
+
+def _python_exe() -> str:
+    """当前 MCP 服务所用的 Python / Python running this MCP server."""
+    return sys.executable or shutil.which("python") or "python"
+
+
+def _find_host_test_script(root: Path, build_cfg: dict[str, Any]) -> Path | None:
+    """Locate the host test driver script / 定位 host 测试驱动脚本."""
+    configured = build_cfg.get("host_test_script")
+    if configured:
+        p = _inside(root, str(configured))
+        if p.is_file():
+            return p
+        raise ValueError(f"build.host_test_script not found: {p}")
+    for rel in _HOST_TEST_SCRIPTS:
+        p = root / rel
+        if p.is_file():
+            return p
+    return None
+
+
+def _resolve_host_cc(build_cfg: dict[str, Any]) -> dict[str, Any] | None:
+    """Resolve a usable host C compiler / 解析可用的宿主编译器.
+
+    显式指定（manifest / 环境变量）但找不到时**报错而不回退**——静默换用 PATH 里
+    另一个编译器会让「用错工具链跑测试」这种问题难以发现。
+    """
+    explicit: str | None = None
+    source = ""
+    if build_cfg.get("host_cc"):
+        explicit, source = str(build_cfg["host_cc"]), "manifest"
+    elif os.environ.get("EMBEDDED_HOST_CC"):
+        explicit, source = os.environ["EMBEDDED_HOST_CC"], "env:EMBEDDED_HOST_CC"
+
+    if explicit:
+        p = Path(explicit).expanduser()
+        if p.is_absolute() or os.sep in explicit or "/" in explicit:
+            if p.is_file():
+                return {"path": str(p.resolve()), "source": source,
+                        "version": _version(str(p.resolve()), ["--version"])}
+            raise ValueError(f"Configured host_cc not found: {explicit}")
+        found = shutil.which(explicit)
+        if found:
+            return {"path": found, "source": source, "version": _version(found, ["--version"])}
+        raise ValueError(f"Configured host_cc not on PATH: {explicit}")
+
+    for cand in _HOST_CC_CANDIDATES:
+        found = shutil.which(cand)
+        if found:
+            return {"path": found, "source": "PATH", "version": _version(found, ["--version"])}
+    return None
+
+
+def _host_test_names(script: Path) -> list[str]:
+    """Parse test names from the driver's ``TESTS = {...}`` dict / 解析测试名.
+
+    只读 AST，不执行脚本。键必须是字符串常量，值的形式不限。
+    """
+    try:
+        tree = ast.parse(script.read_text(encoding="utf-8", errors="replace"))
+    except (OSError, SyntaxError):
+        return []
+    for node in tree.body:
+        if not isinstance(node, ast.Assign):
+            continue
+        if not any(isinstance(t, ast.Name) and t.id == "TESTS" for t in node.targets):
+            continue
+        if not isinstance(node.value, ast.Dict):
+            continue
+        names: list[str] = []
+        for key in node.value.keys:
+            if isinstance(key, ast.Constant) and isinstance(key.value, str):
+                names.append(key.value)
+        return names
+    return []
+
+
+@_response
+def host_test(
+    project_path: str,
+    script: str | None = None,
+    cc: str | None = None,
+    opt: str = "both",
+    only: str | None = None,
+    isolate_failures: bool = True,
+    timeout_s: int = 900,
+) -> dict[str, Any]:
+    """Compile and run host (native) unit tests / 在主机上编译并运行单元测试.
+
+    Requires a host C compiler (gcc/clang/cc) and a driver script that accepts
+    ``--cc`` / ``--opt`` / ``--only``. Never touches hardware, so it can gate a
+    flash step. With ``opt="both"`` the suite runs at -O0 and -O3 to catch
+    optimization-sensitive bugs (missing volatile, uninitialised reads).
+    On failure it re-runs per-test with ``--only`` to name the failing cases.
+    """
+    root = _root(project_path)
+    cfg = _build_cfg(root)
+    if opt not in ("0", "3", "both"):
+        raise ValueError("opt must be '0', '3' or 'both'")
+
+    driver = _inside(root, script) if script else _find_host_test_script(root, cfg)
+    if driver is None:
+        raise ValueError(
+            "Host test driver not found; set build.host_test_script or place "
+            f"one of {list(_HOST_TEST_SCRIPTS)}"
+        )
+    if not driver.is_file():
+        raise ValueError(f"Host test driver not found: {driver}")
+
+    compiler = {"path": cc, "source": "explicit", "version": _version(cc, ["--version"])} if cc else _resolve_host_cc(cfg)
+    if not compiler:
+        raise ValueError(
+            "Host C compiler not found; install gcc/clang or set build.host_cc / EMBEDDED_HOST_CC"
+        )
+
+    opts = ["0", "3"] if opt == "both" else [opt]
+    runs: list[dict[str, Any]] = []
+    t0 = time.monotonic()
+    for level in opts:
+        argv = [_python_exe(), str(driver), "--cc", compiler["path"], "--opt", level]
+        if only:
+            argv += ["--only", only]
+        r = _run(argv, root, dict(os.environ), timeout_s)
+        runs.append({
+            "opt": level,
+            "returncode": r["returncode"],
+            "ok": r["returncode"] == 0,
+            "elapsed_s": r["elapsed_s"],
+            "stdout": r["stdout"],
+            "stderr": r["stderr"],
+        })
+        if r["returncode"] != 0:
+            break  # 第一档就失败，无需再跑第二档
+
+    failed = [r for r in runs if not r["ok"]]
+    result: dict[str, Any] = {
+        "ok": not failed,
+        "project_path": str(root),
+        "driver": str(driver),
+        "host_cc": compiler,
+        "opts": opts,
+        "only": only,
+        "runs": runs,
+        "elapsed_s": round(time.monotonic() - t0, 2),
+        "test_names": _host_test_names(driver),
+    }
+
+    # 失败定位：逐个 --only 重跑，指出是哪个用例挂了
+    if failed and isolate_failures and not only:
+        names = result["test_names"]
+        isolation: list[dict[str, Any]] = []
+        for name in names:
+            argv = [_python_exe(), str(driver), "--cc", compiler["path"], "--opt", opts[0], "--only", name]
+            r = _run(argv, root, dict(os.environ), timeout_s)
+            isolation.append({
+                "name": name,
+                "ok": r["returncode"] == 0,
+                "returncode": r["returncode"],
+                "stderr_tail": (r["stderr"] or r["stdout"])[-800:],
+            })
+        result["isolation"] = isolation
+        result["failing_tests"] = [i["name"] for i in isolation if not i["ok"]]
+
+    result["note"] = (
+        "Host tests cover hardware-independent logic only; "
+        "timing/peripheral/DMA behaviour still needs target hardware"
+    )
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Tools / 工具实现
 # ---------------------------------------------------------------------------
 
@@ -485,6 +672,16 @@ def build_status(project_path: str, preset: str = "Debug") -> dict[str, Any]:
         fw_error = str(exc)
     compile_db = root / "build" / preset / "compile_commands.json"
     toolchain_file = _find_toolchain_file(root)
+    # Host 测试可用性（只读探测，不执行）
+    host_driver = None
+    host_names: list[str] = []
+    try:
+        host_driver = _find_host_test_script(root, cfg)
+        if host_driver:
+            host_names = _host_test_names(host_driver)
+    except ValueError:
+        host_driver = None
+    host_cc = _resolve_host_cc(cfg)
     return {
         "project_path": str(root),
         "preset": preset,
@@ -499,6 +696,13 @@ def build_status(project_path: str, preset: str = "Debug") -> dict[str, Any]:
         "compile_commands": str(compile_db) if compile_db.is_file() else None,
         "firmware": fw,
         "firmware_error": fw_error,
+        "host_test": {
+            "driver": str(host_driver) if host_driver else None,
+            "test_names": host_names,
+            "test_count": len(host_names),
+            "host_cc": host_cc,
+            "ready": bool(host_driver and host_cc),
+        },
     }
 
 
@@ -620,13 +824,23 @@ def workflow_pipeline(
     serial_number: str | None = None,
     sample_cpu: bool = False,
     timeout_s: int = 600,
+    host_test_enabled: bool = True,
+    host_test_opt: str = "both",
+    host_cc: str | None = None,
 ) -> dict[str, Any]:
-    """One-call build → (optional) flash/verify/run → (optional) runtime evidence / 一体化流水线.
+    """One-call build → host tests → (optional) flash/verify/run → (optional) evidence / 一体化流水线.
 
     Safe by default: ``flash`` is False. When ``flash=True``, ``confirm=True`` is
-    required because this performs a real Flash write. ``observe_s>0`` starts a
-    short runtime monitor, captures one report, then releases the hardware.
-    For long observations use deploy_project + get_runtime_report polling instead.
+    required because this performs a real Flash write.
+
+    ``host_test_enabled=True`` runs the host (native) unit tests **before** any
+    Flash write, so a logic regression never reaches the board. The stage is
+    skipped (not failed) when the project has no host test driver or no host
+    compiler. ``host_test_opt="both"`` runs -O0 and -O3.
+
+    ``observe_s>0`` starts a short runtime monitor, captures one report, then
+    releases the hardware. For long observations use deploy_project +
+    get_runtime_report polling instead.
     """
     root = _root(project_path)
     if observe_s < 0 or observe_s > 3600:
@@ -645,6 +859,46 @@ def workflow_pipeline(
 
     fw_rel = built["data"]["firmware"]["relative"]
     fw_hash = built["data"]["firmware"]["sha256"]
+
+    # ---- Host 测试门禁：烧录前先拦截逻辑回归 ----
+    if host_test_enabled:
+        cfg = _build_cfg(root)
+        driver = None
+        try:
+            driver = _find_host_test_script(root, cfg)
+        except ValueError as exc:
+            stages.append({"name": "host_test", "skipped": True, "reason": str(exc)})
+        if driver is None:
+            stages.append({
+                "name": "host_test",
+                "skipped": True,
+                "reason": "no host test driver found (set build.host_test_script to enable)",
+            })
+        elif _resolve_host_cc(cfg) is None:
+            stages.append({
+                "name": "host_test",
+                "skipped": True,
+                "reason": "no host C compiler found (install gcc/clang or set build.host_cc)",
+            })
+        else:
+            tested = host_test(
+                str(root), opt=host_test_opt, cc=host_cc, timeout_s=max(120, timeout_s * 2)
+            )
+            stages.append({"name": "host_test", "result": tested})
+            if not tested.get("success") or not tested["data"].get("ok"):
+                detail = ""
+                failing = (tested.get("data") or {}).get("failing_tests")
+                if failing:
+                    detail = f"; failing: {', '.join(failing)}"
+                return {
+                    "ok": False,
+                    "message": f"host tests failed; firmware NOT flashed{detail}",
+                    "firmware": fw_rel,
+                    "firmware_sha256": fw_hash,
+                    "stages": stages,
+                }
+    else:
+        stages.append({"name": "host_test", "skipped": True, "reason": "host_test_enabled=False"})
 
     if flash:
         deployed = _wf.deploy_project(

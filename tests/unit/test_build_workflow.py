@@ -169,3 +169,153 @@ def test_env_override_names_avoid_scrubbed_prefixes() -> None:
         assert not name.startswith("DSH_"), name
         for banned in ("KEY", "PASSWORD", "SECRET", "TOKEN"):
             assert banned not in name.upper().replace("EMBEDDED_", ""), name
+
+
+# ---------------------------------------------------------------------------
+# Host test integration / Host 单元测试集成
+# ---------------------------------------------------------------------------
+
+HOST_DRIVER = '''
+import argparse
+ROOT = "."
+WRAP = "03_Platform/Wrapper/"
+TESTS = {
+    "can": ["a.c"],
+    "factory_protocol": ["b.c", WRAP + "c.c"],
+    "queue_stress": ["d.c"],
+}
+'''
+
+
+def _write_host_driver(root: Path, body: str = HOST_DRIVER) -> Path:
+    tests = root / "Tests"
+    tests.mkdir()
+    script = tests / "run_host_tests.py"
+    script.write_text(body, encoding="utf-8")
+    return script
+
+
+def test_host_test_names_parses_dict_keys(project: Path) -> None:
+    script = _write_host_driver(project)
+    assert bw._host_test_names(script) == ["can", "factory_protocol", "queue_stress"]
+
+
+def test_host_test_names_tolerates_missing_dict(tmp_path: Path) -> None:
+    script = tmp_path / "run.py"
+    script.write_text("TESTS = build_tests()\n", encoding="utf-8")
+    assert bw._host_test_names(script) == []
+
+
+def test_host_test_names_tolerates_syntax_error(tmp_path: Path) -> None:
+    script = tmp_path / "broken.py"
+    script.write_text("def f(:\n", encoding="utf-8")
+    assert bw._host_test_names(script) == []
+
+
+def test_find_host_test_script_autodetect(project: Path) -> None:
+    script = _write_host_driver(project)
+    assert bw._find_host_test_script(project, {}) == script
+
+
+def test_find_host_test_script_manifest_override(project: Path) -> None:
+    script = project / "custom" / "driver.py"
+    script.parent.mkdir()
+    script.write_text("TESTS = {}\n", encoding="utf-8")
+    assert bw._find_host_test_script(project, {"host_test_script": "custom/driver.py"}) == script
+
+
+def test_find_host_test_script_missing_returns_none(project: Path) -> None:
+    assert bw._find_host_test_script(project, {}) is None
+
+
+def test_resolve_host_cc_explicit_path(tmp_path: Path) -> None:
+    """显式传入的编译器路径优先；配置了但不存在时应报错（不静默回退）。"""
+    fake = tmp_path / "mycc"
+    fake.write_text("", encoding="utf-8")
+    assert bw._resolve_host_cc({"host_cc": str(fake)})["path"] == str(fake.resolve())
+    with pytest.raises(ValueError, match="not found"):
+        bw._resolve_host_cc({"host_cc": str(tmp_path / "nope")})
+
+
+def test_pipeline_skips_host_test_when_disabled(project: Path, monkeypatch) -> None:
+    monkeypatch.setattr(
+        bw, "build_project",
+        lambda *a, **k: {"success": True,
+                         "data": {"ok": True, "firmware": {"relative": "build/Debug/demo.elf",
+                                                           "sha256": "cd" * 32}}},
+    )
+    called = {"host_test": False}
+    monkeypatch.setattr(bw, "host_test", lambda *a, **k: called.__setitem__("host_test", True) or {})
+    r = bw.workflow_pipeline(str(project), flash=False, host_test_enabled=False)
+    assert r["success"] is True
+    assert called["host_test"] is False
+    stage = next(s for s in r["data"]["stages"] if s["name"] == "host_test")
+    assert stage["skipped"] is True
+
+
+def test_pipeline_skips_host_test_without_driver(project: Path, monkeypatch) -> None:
+    monkeypatch.setattr(
+        bw, "build_project",
+        lambda *a, **k: {"success": True,
+                         "data": {"ok": True, "firmware": {"relative": "build/Debug/demo.elf",
+                                                           "sha256": "ef" * 32}}},
+    )
+    r = bw.workflow_pipeline(str(project), flash=False, host_test_enabled=True)
+    assert r["success"] is True
+    stage = next(s for s in r["data"]["stages"] if s["name"] == "host_test")
+    assert stage["skipped"] is True
+    assert "driver" in stage["reason"]
+
+
+def test_pipeline_blocks_flash_when_host_test_fails(project: Path, monkeypatch) -> None:
+    """核心安全语义：host 测试失败时绝不烧录。"""
+    _write_host_driver(project)
+    monkeypatch.setattr(
+        bw, "build_project",
+        lambda *a, **k: {"success": True,
+                         "data": {"ok": True, "firmware": {"relative": "build/Debug/demo.elf",
+                                                           "sha256": "12" * 32}}},
+    )
+    monkeypatch.setattr(
+        bw, "host_test",
+        lambda *a, **k: {"success": True, "data": {"ok": False, "failing_tests": ["gap_zero"]}},
+    )
+    monkeypatch.setattr(bw, "_resolve_host_cc",
+                        lambda cfg: {"path": "gcc", "source": "stub", "version": "stub"})
+
+    from jlink_mcp.tools import workflow as wf
+
+    deployed = {"called": False}
+
+    def fake_deploy(**kwargs):  # pragma: no cover - 不应被调用
+        deployed["called"] = True
+        return {"success": True, "data": {}}
+
+    monkeypatch.setattr(wf, "deploy_project", fake_deploy)
+
+    r = bw.workflow_pipeline(str(project), flash=True, confirm=True)
+    data = r["data"]
+    assert data["ok"] is False
+    assert deployed["called"] is False
+    assert "NOT flashed" in data["message"]
+    assert "gap_zero" in data["message"]
+
+
+def test_pipeline_proceeds_when_host_test_passes(project: Path, monkeypatch) -> None:
+    _write_host_driver(project)
+    monkeypatch.setattr(
+        bw, "build_project",
+        lambda *a, **k: {"success": True,
+                         "data": {"ok": True, "firmware": {"relative": "build/Debug/demo.elf",
+                                                           "sha256": "34" * 32}}},
+    )
+    monkeypatch.setattr(bw, "host_test",
+                        lambda *a, **k: {"success": True, "data": {"ok": True, "runs": []}})
+    monkeypatch.setattr(bw, "_resolve_host_cc",
+                        lambda cfg: {"path": "gcc", "source": "stub", "version": "stub"})
+    r = bw.workflow_pipeline(str(project), flash=False)
+    data = r["data"]
+    assert data["ok"] is True
+    stage = next(s for s in data["stages"] if s["name"] == "host_test")
+    assert stage["result"]["data"]["ok"] is True
+
