@@ -2,5 +2,26 @@
   "ioc": "demo.ioc",
   "chip_name": "STM32F407VG",
   "firmware": "build/Debug/demo.elf",
-  "flash_address": "0x08000000"
+  "flash_address": "0x08000000",
+
+  "_comment_build": "Portable build workflow. All tool paths are OPTIONAL: leave them out to auto-discover via PATH / sibling of arm-none-eabi-gcc / common install dirs. On a new machine, prefer EMBEDDED_* env vars over hardcoding paths here.",
+
+  "build": {
+    "preset": "Debug",
+    "firmware": "build/Debug/demo.elf",
+    "configure_args": [],
+    "build_args": [],
+    "env": {},
+    "toolchain": {}
+  },
+
+  "_comment_toolchain_example": "Uncomment only if auto-discovery fails (e.g. toolchain installed in a nonstandard location). Keys: cmake, ninja, arm_gcc, arm_gdb, arm_size, arm_objcopy, jlink_gdbserver.",
+  "_example_toolchain": {
+    "cmake": "C:/Program Files/CMake/bin/cmake.exe",
+    "ninja": "C:/Windows/ninja.exe",
+    "arm_gcc": "C:/Program Files (x86)/Arm/GNU Toolchain mingw-w64-i686-arm-none-eabi/bin/arm-none-eabi-gcc.exe",
+    "jlink_gdbserver": "D:/SEGGER/JLink_V812c/JLinkGDBServer.exe"
+  },
+
+  "_comment_env": "EMBEDDED_* env vars (set in the MCP client config) override discovery without editing this file: EMBEDDED_CMAKE, EMBEDDED_NINJA, EMBEDDED_ARM_GCC, EMBEDDED_ARM_GDB, EMBEDDED_ARM_SIZE, EMBEDDED_ARM_OBJCOPY, EMBEDDED_JLINK_GDBSERVER. Avoid names containing KEY/PASSWORD/SECRET/TOKEN and DSH_* (scrubbed by the MCP client bridge)."
 }

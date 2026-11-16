@@ -21,19 +21,38 @@
 
 文件存在、参与编译、最终链接、运行时输出是不同层次的证据。主机服务不自动修改用户固件，也不自动植入 RTOS 或 SystemView。
 
-## 安装（Windows / PowerShell）
+## 快速安装（一键，跨平台）
 
-需要 Python 3.10+、SEGGER J-Link Software，以及接在本机上的 J-Link 与已供电开发板。
+需要 Python 3.10+。解压/克隆后进入源码根目录，运行：
 
-解压后进入源码根目录：
+```bash
+python setup_mcp.py
+```
+
+脚本会：创建 `.venv` → 以 editable 模式安装依赖 → 自检工具链 → 打印可直接粘贴的 MCP 客户端配置。
+重复运行是安全的（复用已有 venv）；`--force` 重建，`--check` 只自检不安装，`--dev` 附带测试依赖。
+
+**外部前置条件（脚本无法代装）：**
+
+| 依赖 | 用途 | 缺失后果 |
+|---|---|---|
+| SEGGER J-Link Software | J-Link 驱动 / `JLinkARM.dll` / `JLinkGDBServer` | 所有硬件工具不可用 |
+| `cmake` + `ninja` + `arm-none-eabi-gcc` | 编译（`build_*` / `workflow_pipeline`） | 仅编译不可用，烧录调试照常 |
+| 芯片厂商 SVD 目录（可选） | 寄存器按字段解析 | 仅 SVD 工具不可用，可用 `JLINK_SVD_DIR` 指定 |
+
+工具链路径**不需要手写**：服务按 `manifest → EMBEDDED_* 环境变量 → PATH → gcc 兄弟目录 → 常见安装目录` 自动发现。
+换机器只需设 `EMBEDDED_CMAKE` / `EMBEDDED_ARM_GCC` 等环境变量，源码不动。
+
+> 注意：环境变量名不要包含 `KEY` / `PASSWORD` / `SECRET` / `TOKEN`，也不要使用 `DSH_*` 前缀
+> —— 部分 MCP 客户端（如 dsh-mcp-client）会清洗这些变量。
+
+## 手工安装（Windows / PowerShell）
 
 ```powershell
 py -3.12 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -e .
 .\.venv\Scripts\python.exe -m jlink_mcp
 ```
-
-最后一条命令启动 stdio MCP 服务，等待客户端请求，不能把它当交互式命令行输入 Python 函数。通常由客户端直接启动，无需手动运行。
 
 Linux / macOS：
 
@@ -43,7 +62,12 @@ python3 -m venv .venv
 .venv/bin/python -m jlink_mcp
 ```
 
+最后一条命令启动 stdio MCP 服务，等待客户端请求，不能把它当交互式命令行输入 Python 函数。通常由客户端直接启动，无需手动运行。
+
 安装后的新命令为 `jlink-insight-mcp`，兼容命令 `jlink-mcp` 也保留。Python 包路径仍为 `jlink_mcp`。
+
+> ⚠️ 依赖里的 `mcp` 必须 `<2`：本包使用 `mcp.server.fastmcp`，`mcp` 2.x 已将其改名为 `MCPServer`，
+> 装上 2.x 会在启动时抛 `ModuleNotFoundError: No module named 'mcp.server.fastmcp'`。
 
 ## 客户端配置
 
@@ -134,8 +158,55 @@ SVD 外设读取可能有硬件副作用，应只请求需要的寄存器，不�
 | `start_firmware_watch` | 编译产物变化后自动部署 |
 | `get_firmware_watch_status` / `stop_firmware_watch` | 查询 / 停止编译监听 |
 | `systemview_capture` / `systemview_decode` | 限时前台采集 / 原始二进制离线解码 |
+| `toolchain_detect` | 自动发现 cmake / ninja / arm-none-eabi-* / JLinkGDBServer 及版本 |
+| `build_status` | 盘点 manifest、presets、工具链文件、compile_commands、ELF SHA256 与 Flash/RAM 占用 |
+| `build_project` | configure + build，返回完整编译器输出、warning/error 计数、ELF hash |
+| `workflow_pipeline` | 一次串起 build →（可选）flash/校验/运行 →（可选）短时取证 |
+| `gdb_batch` | 拉起 JLinkGDBServer + `arm-none-eabi-gdb -batch` 做 `bt`/寄存器/内存/反汇编 |
 
 基础连接、调试、RTT、SVD 等原工具继续保留；可用客户端工具列表查看完整接口。`reset_target` 支持 normal / halt；core-only reset 和范围擦除没有伪造的 pylink 调用。推荐使用 `deploy_project` 完成固件下载，避免手动整片擦除。
+
+## 无 VSCode 的编译 / 烧录 / 调试工作流
+
+新增的 5 个工具让这个服务可以独立承担「编译 → 烧录 → 取证 → 符号级调试」，
+不依赖 VSCode / CubeIDE，可直接在任意支持 MCP 的 Agent 里驱动。
+
+在工程根目录放 `jlink-project.json`（参考 [examples/jlink-project.json](examples/jlink-project.json)），
+工具链路径留空即自动发现：
+
+```json
+{
+  "ioc": "Application.ioc",
+  "chip_name": "STM32U575RG",
+  "firmware": "build/Debug/Application_FACTORY.elf",
+  "flash_address": "0x08000000",
+  "build": { "preset": "Debug", "firmware": "build/Debug/Application_FACTORY.elf" }
+}
+```
+
+典型调用顺序：
+
+```text
+build_status(project_path)                        # 只读：工具链 / presets / ELF / 占用
+build_project(project_path, preset="Debug")       # 编译，拿 ELF SHA256
+deploy_project(firmware_path=…, chip_name=…)      # 烧录 + 逐字节校验 + 运行
+get_runtime_report() / rtt_read()                 # 取证
+stop_runtime_monitor()                            # 释放硬件
+gdb_batch(project_path, commands=["bt"])          # 需要符号级回溯时
+```
+
+或者一条 `workflow_pipeline(project_path, flash=True, confirm=True, observe_s=30)` 走完中间三步。
+
+**可移植性**：工具链按 `manifest → EMBEDDED_* 环境变量 → PATH → arm-none-eabi-gcc 兄弟目录 → 常见安装目录`
+五级解析，代码中没有任何机器专属路径。换机器只设环境变量：
+
+`EMBEDDED_CMAKE` · `EMBEDDED_NINJA` · `EMBEDDED_ARM_GCC` · `EMBEDDED_ARM_GDB` ·
+`EMBEDDED_ARM_SIZE` · `EMBEDDED_ARM_OBJCOPY` · `EMBEDDED_JLINK_GDBSERVER`
+
+**安全默认**：`workflow_pipeline` 的 `flash` 默认 `false`；打开时必须 `confirm=True`（真实写 Flash）。
+全部子进程用 argv 列表 + `stdin=DEVNULL` + `capture_output`，不经过 shell，stdout 只留给 MCP 协议。
+
+> 实现细节与已知坑（含 `stdin` 管道阻塞、`mcp<2` 约束）见 [docs/BUILD_WORKFLOW.md](docs/BUILD_WORKFLOW.md)。
 
 ## 测试与开发
 

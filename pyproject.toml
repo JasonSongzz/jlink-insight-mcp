@@ -29,7 +29,9 @@ dependencies = [
     "pylink-square>=2.0.0",
     "pyelftools>=0.32",
     "intelhex>=2.3.0",
-    "mcp>=1.26.0",
+    # 必须锁 <2：本包使用 mcp.server.fastmcp，mcp 2.x 已将其改名为 MCPServer，
+    # 装上 2.x 会在启动时抛 ModuleNotFoundError: No module named 'mcp.server.fastmcp'。
+    "mcp>=1.26.0,<2",
     "numpy>=1.26.0",
     "pydantic>=2.12.0",
     "pydantic-settings>=2.12.0",
@@ -78,6 +80,9 @@ dev = [
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/jlink_mcp"]
+# 注意：不要额外加 force-include 指向 src/jlink_mcp/resources。
+# hatchling 的 `packages` 已自动包含包目录下的非 .py 资源（SVD / JLink 补丁），
+# 再加 force-include 会导致同一路径被写入两次而构建失败。
 
 [tool.hatch.build.targets.sdist]
 include = [

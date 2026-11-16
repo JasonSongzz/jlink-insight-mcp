@@ -62,9 +62,30 @@ class SVDManager:
             logger.info(f"使用包内SVD目录: {self._svd_path}")
 
         # Pickle 缓存目录
+        # 优先写在包内（开发/venv 安装）；若包目录只读（系统级安装、只读镜像），
+        # 回退到 JLINK_MCP_CACHE_DIR 或用户缓存目录，避免启动即 PermissionError。
         current_dir = Path(__file__).resolve().parent
-        self._cache_dir = current_dir / ".svd_cache"
-        self._cache_dir.mkdir(exist_ok=True)
+        cache_candidates = [current_dir / ".svd_cache"]
+        env_cache = os.environ.get("JLINK_MCP_CACHE_DIR")
+        if env_cache:
+            cache_candidates.append(Path(env_cache) / "svd_cache")
+        cache_candidates.append(Path.home() / ".cache" / "jlink_mcp" / "svd_cache")
+        self._cache_dir = cache_candidates[0]
+        for candidate in cache_candidates:
+            try:
+                candidate.mkdir(parents=True, exist_ok=True)
+                # 验证确实可写，避免 mkdir 成功但写入失败
+                probe = candidate / ".write_probe"
+                probe.write_text("ok", encoding="utf-8")
+                probe.unlink()
+                self._cache_dir = candidate
+                if candidate != cache_candidates[0]:
+                    logger.warning("包内缓存目录不可写，改用: %s", candidate)
+                break
+            except OSError:
+                continue
+        else:
+            logger.warning("所有 SVD 缓存候选目录均不可写，SVD pickle 缓存将禁用")
 
         # 存储已加载的设备 SVD 数据
         self._devices: Dict[str, DeviceSVD] = {}

@@ -1,9 +1,14 @@
 # 包含所有文档
 include *.md
 include LICENSE
+include setup_mcp.py
 
 # 包含文档目录
 global-include docs/*.md
+
+# 包含示例配置（manifest / 客户端配置片段）
+global-include examples/*.json
+global-include examples/*.toml
 
 # 排除测试文件
 global-exclude test_*.py
@@ -12,3 +17,4 @@ global-exclude test_*.py
 global-exclude *.pyc
 global-exclude __pycache__
 global-exclude .DS_Store
+global-exclude .svd_cache

@@ -91,6 +91,7 @@ from .tools.semantic import (
 )
 
 from .tools import workflow as _workflow
+from .tools import build_workflow as _build_workflow
 
 # 创建 FastMCP 实例
 mcp = FastMCP("jlink-insight-mcp")
@@ -327,6 +328,97 @@ async def get_firmware_watch_status() -> dict[str, Any]:
 async def stop_firmware_watch() -> dict[str, Any]:
     """Stop future automatic deployments; firmware keeps running / 停止后续自动部署，固件继续运行."""
     return _workflow.stop_firmware_watch()
+
+
+# ========================================
+# Portable build / debug workflow / 可移植编译与调试工作流
+# ========================================
+
+
+@mcp.tool()
+async def toolchain_detect(project_path: str | None = None) -> dict[str, Any]:
+    """Discover CMake/Ninja/arm-none-eabi/J-Link toolchain / 探测本机嵌入式工具链.
+
+    Resolution order: jlink-project.json build.toolchain → EMBEDDED_* env vars →
+    PATH → sibling of arm-none-eabi-gcc → common install locations.
+    Returns paths, versions and build_ready/debug_ready flags. Read-only.
+    """
+    return _build_workflow.toolchain_detect(project_path)
+
+
+@mcp.tool()
+async def build_status(project_path: str, preset: str = "Debug") -> dict[str, Any]:
+    """Report manifest, toolchain, firmware SHA256 and size / 盘点工程与编译产物状态.
+
+    Read-only. Recommended as the first tool call in a headless session.
+    """
+    return _build_workflow.build_status(project_path, preset)
+
+
+@mcp.tool()
+async def build_project(
+    project_path: str,
+    preset: str = "Debug",
+    clean: bool = False,
+    target: str | None = None,
+    configure_args: list[str] | None = None,
+    build_args: list[str] | None = None,
+    timeout_s: int = 600,
+) -> dict[str, Any]:
+    """Configure + build a CMake/Ninja/arm-none-eabi project / 编译工程并产出证据.
+
+    Uses CMakePresets.json when the preset exists, else explicit Ninja configure.
+    Returns raw compiler output, ELF SHA256, size output, warning/error counts.
+    Never touches hardware and does not modify source files.
+    """
+    return _build_workflow.build_project(
+        project_path, preset, clean, target, configure_args, build_args, timeout_s
+    )
+
+
+@mcp.tool()
+async def workflow_pipeline(
+    project_path: str,
+    preset: str = "Debug",
+    flash: bool = False,
+    confirm: bool = False,
+    observe_s: int = 0,
+    chip_name: str | None = None,
+    serial_number: str | None = None,
+    sample_cpu: bool = False,
+    timeout_s: int = 600,
+) -> dict[str, Any]:
+    """One-call build → optional flash/verify/run → optional runtime evidence / 一体化流水线.
+
+    Safe by default: flash=False. flash=True requires confirm=True (real Flash write).
+    observe_s>0 starts a short monitor, captures one report, then releases hardware.
+    For long observations use deploy_project + get_runtime_report polling.
+    """
+    return _build_workflow.workflow_pipeline(
+        project_path, preset, flash, confirm, observe_s, chip_name,
+        serial_number, sample_cpu, timeout_s,
+    )
+
+
+@mcp.tool()
+async def gdb_batch(
+    project_path: str,
+    commands: list[str] | None = None,
+    elf_path: str | None = None,
+    chip_name: str | None = None,
+    port: int = 2331,
+    interface: str = "SWD",
+    timeout_s: int = 120,
+) -> dict[str, Any]:
+    """One-shot symbol-level debug via J-Link GDB Server / 无 VSCode 的符号级调试.
+
+    Spawns JLinkGDBServer if the port is free, runs arm-none-eabi-gdb -batch with
+    -ex commands (bt / info registers / x / disassemble), then stops the server.
+    Stop runtime monitor first (hardware is exclusive).
+    """
+    return _build_workflow.gdb_batch(
+        project_path, commands, elf_path, chip_name, port, interface, timeout_s
+    )
 
 
 # ========================================
