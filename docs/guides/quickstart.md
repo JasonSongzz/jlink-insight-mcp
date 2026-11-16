@@ -2,42 +2,56 @@
 
 ## 安装方式
 
-### 方式 1: 使用 UV (推荐)
+### 推荐：一键安装脚本
 
 ```bash
-# 1. 安装 uv
-pip install uv
-
-# 2. 克隆项目
-git clone https://github.com/cyj0920/jlink_mcp.git
-cd jlink_mcp
-
-# 3. 创建虚拟环境
-uv venv --python 3.12
-
-# 4. 激活环境 (Windows)
-.venv\Scripts\activate
-
-# 5. 安装依赖
-uv pip install -e .
-
-# 6. 运行测试
-pytest tests/ -v
-
-# 7. 启动 MCP 服务器
-jlink-mcp
+git clone https://github.com/JasonSongzz/jlink-insight-mcp.git
+cd jlink-insight-mcp
+python setup_mcp.py --mirror https://pypi.tuna.tsinghua.edu.cn/simple
 ```
 
-### 方式 2: 使用 pip
+脚本会创建 `.venv`、安装依赖、自检工具链，并打印可直接粘贴的 MCP 客户端配置。
+
+外部前置依赖需自行安装（脚本无法代装）：
+
+- **SEGGER J-Link Software**：提供 `JLinkARM.dll` / `JLinkGDBServer`
+- **cmake + ninja + arm-none-eabi-gcc**：编译功能需要（装 STM32CubeCLT 也可）
+
+完整检查步骤见 README 的「新机器 6 步检查清单」。
+
+### 方式 2：手动安装
 
 ```bash
-# 从 PyPI 安装
-pip install jlink-mcp
+git clone https://github.com/JasonSongzz/jlink-insight-mcp.git
+cd jlink-insight-mcp
 
-# 或从源码安装
-git clone https://github.com/cyj0920/jlink_mcp.git
-cd jlink_mcp
-pip install -e .
+# 创建 venv
+python -m venv .venv
+
+# 安装（Windows）
+.venv\Scripts\python.exe -m pip install --no-cache-dir .
+
+# 安装（Linux / macOS）
+.venv/bin/python -m pip install --no-cache-dir .
+
+# 启动 stdio MCP 服务（通常由客户端拉起，无需手动运行）
+.venv\Scripts\python.exe -m jlink_mcp
+```
+
+三个注意点：
+
+- **不要跑 `pip install --upgrade pip`**：venv 自带 pip 够用，自升级在部分网络/代理下会挂起数分钟。
+- **不要用 editable 安装（`-e`）做日常使用**：部分 hatchling/pip 组合会卡在
+  `prepare_metadata_for_build_editable`；只有需要改源码即时生效时才用 `--editable`。
+- **包名是 `jlink-insight-mcp`，不是 `jlink-mcp`**；PyPI 上的 `jlink-mcp` 是上游旧包，功能与本文不符。
+
+### 方式 3：使用 uv（可选）
+
+```bash
+git clone https://github.com/JasonSongzz/jlink-insight-mcp.git
+cd jlink-insight-mcp
+uv venv --python 3.12
+uv pip install --no-cache-dir .
 ```
 
 ---

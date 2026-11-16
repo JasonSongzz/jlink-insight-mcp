@@ -2,7 +2,37 @@
 
 让 Claude / Codex 根据 STM32 工程的实际能力，自动烧录已编译固件、启动运行，并通过 J-Link、RTT、SystemView 获取运行证据与诊断反馈。
 
-基于 [cyj0920/jlink_mcp](https://github.com/cyj0920/jlink_mcp) 扩展，保留基础调试、SVD、GDB Server 和设备补丁功能。当前版本 **0.2.0**，提供完整可安装源码与测试，尚未经真实开发板验证。
+当前版本 **0.2.0**，提供完整可安装源码与测试，尚未经真实开发板验证。
+
+## 新机器 6 步检查清单
+
+> 换一台电脑时按顺序走一遍。每步都有期望输出；不对就按「失败怎么办」排查。
+
+| # | 做什么 | 验证命令 | 期望 | 失败怎么办 |
+|---|---|---|---|---|
+| 1 | 装 SEGGER J-Link Software | `where JLinkGDBServer.exe` | 打印一个路径 | 从 segger.com 下载安装；装完重开终端 |
+| 2 | 装编译工具链 | `arm-none-eabi-gcc --version`、`cmake --version`、`ninja --version` | 各自打印版本 | 装 STM32CubeCLT 或 Arm GNU Toolchain + CMake；确保在 `PATH` |
+| 3 | 克隆仓库 | `git clone https://github.com/JasonSongzz/jlink-insight-mcp.git` | 目录里有 `setup_mcp.py` | 检查网络 / 代理 |
+| 4 | 一键装 Python 环境 | `python setup_mcp.py --mirror https://pypi.tuna.tsinghua.edu.cn/simple` | 约 66s，`build_ready = True`、`debug_ready = True` | 先 `--check` 只自检；卡住见下文「安装卡住怎么办」 |
+| 5 | 配 MCP 客户端 | 粘贴脚本打印的 JSON/YAML，确认 `command` 是 venv 里 python 的**绝对路径**、`cwd` 是 clone 目录 | 重载后 `tools/list` 出现 **64** 个工具 | 路径必须绝对；Windows 用正斜杠或转义反斜杠 |
+| 6 | 在固件工程放 manifest | 工程根目录建 `jlink-project.json`（参考 `examples/jlink-project.json`） | `build_status` 返回 firmware + SHA256 | 不建也能用，但每次要手传 `project_path` / `firmware_path` |
+
+装完后的三条验证（在 Agent 里直接调工具）：
+
+```text
+toolchain_detect()                 → build_ready 与 debug_ready 都应为 true
+build_status("D:/your/project")    → presets、工具链文件、ELF SHA256、Flash/RAM 占用
+list_jlink_devices()               → 插着 J-Link 时至少返回一个探针
+```
+
+**缺哪个前置依赖，就少哪类能力**（服务永远能启动，缺的能力调用时报错）：
+
+| 已安装 | 可用 | 不可用 |
+|---|---|---|
+| 仅 Python 环境 | 服务启动、64 个工具全部注册 | 全部硬件工具、全部编译工具 |
+| ＋编译工具链 | `toolchain_detect` / `build_status` / `build_project` | 烧录、RTT、寄存器、`gdb_batch` |
+| ＋J-Link | `deploy_project` / `rtt_read` / `runtime_snapshot` / `gdb_batch` | SVD 按字段解析（需 SVD 文件） |
+| ＋SVD 目录（可选） | `read_register_with_fields` 等 | — |
 
 ## 运行流程
 
