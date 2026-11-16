@@ -46,6 +46,15 @@ python setup_mcp.py
 > 注意：环境变量名不要包含 `KEY` / `PASSWORD` / `SECRET` / `TOKEN`，也不要使用 `DSH_*` 前缀
 > —— 部分 MCP 客户端（如 dsh-mcp-client）会清洗这些变量。
 
+**安装卡住怎么办：**
+
+- 脚本**不会**执行 `pip install --upgrade pip`。venv 自带 pip 已够用，而自升级在部分网络/代理环境
+  会挂起数分钟（实测 >180s 无输出、CPU≈0）。这是首次安装最常见的卡点。
+- 国内网络慢可指定镜像：`set PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple`（Windows）
+  或 `export PIP_INDEX_URL=...`（Linux/macOS）。
+- 需要代理时设 `HTTPS_PROXY` / `HTTP_PROXY` 后再运行脚本。
+- 离线环境：先在联网机器 `pip download` 出依赖，再用 `--find-links` 安装。
+
 ## 手工安装（Windows / PowerShell）
 
 ```powershell

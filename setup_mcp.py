@@ -22,6 +22,7 @@ import os
 import shutil
 import subprocess
 import sys
+import urllib.parse
 import venv
 from pathlib import Path
 
@@ -36,9 +37,32 @@ def venv_python() -> Path:
     return VENV / "bin" / "python"
 
 
-def run(argv: list[str], cwd: Path | None = None, check: bool = True) -> int:
+def pip_env(mirror: str | None = None) -> dict[str, str]:
+    """pip 子进程环境 / Environment for pip.
+
+    默认加超时与重试，避免网络抖动时静默挂起数分钟。
+    ``mirror`` 非空时覆盖 PIP_INDEX_URL（不改用户全局配置，只影响本次安装）。
+    """
+    env = dict(os.environ)
+    env.setdefault("PIP_DEFAULT_TIMEOUT", "30")
+    env.setdefault("PIP_RETRIES", "2")
+    if mirror:
+        env["PIP_INDEX_URL"] = mirror
+        host = urllib.parse.urlparse(mirror).hostname
+        if host:
+            env["PIP_TRUSTED_HOST"] = host
+    return env
+
+
+def run(argv: list[str], cwd: Path | None = None, check: bool = True,
+        env: dict[str, str] | None = None) -> int:
     print(f"  $ {' '.join(str(a) for a in argv)}")
-    p = subprocess.run(argv, cwd=str(cwd) if cwd else None, stdin=subprocess.DEVNULL)
+    p = subprocess.run(
+        argv,
+        cwd=str(cwd) if cwd else None,
+        stdin=subprocess.DEVNULL,
+        env=env,
+    )
     if check and p.returncode != 0:
         raise SystemExit(f"命令失败 (exit {p.returncode}): {' '.join(map(str, argv))}")
     return p.returncode
@@ -64,14 +88,45 @@ def create_venv(force: bool) -> None:
     venv.EnvBuilder(with_pip=True, clear=False, upgrade_deps=False).create(VENV)
 
 
-def install(extra: str = "") -> None:
+def install(extra: str = "", mirror: str | None = None, editable: bool = False) -> None:
     py = venv_python()
     if not py.exists():
         raise SystemExit(f"venv 中找不到 python: {py}")
-    # 优先用 editable：源码即真源，改完立即生效，无需重装。
-    target = f"{REPO}{extra}"
-    run([str(py), "-m", "pip", "install", "--upgrade", "pip", "--quiet"])
-    run([str(py), "-m", "pip", "install", "-e", target])
+    env = pip_env(mirror)
+    # 注意 1：不要跑 `pip install --upgrade pip`。
+    # venv 自带的 pip 足够用；自升级在某些网络/代理环境下会挂起数分钟
+    # （实测 >180s 无输出、CPU≈0），是首次安装最常见的卡点。
+    #
+    # 注意 2：默认用**非 editable** 安装。
+    # editable 走 `prepare_metadata_for_build_editable`，在部分 hatchling /
+    # pip 组合下会失败并长时间挂起（实测 20 分钟无输出）。普通安装只走
+    # `build_wheel`，稳定得多。需要改源码即时生效时用 --editable。
+    #
+    # 注意 3：先装 hatchling 再 `--no-build-isolation`，省掉 build isolation
+    # 的一次网络往返，慢网络下更稳；失败则回退默认隔离构建。
+    #
+    # 注意 4：所有 pip 调用都加 `--no-cache-dir`。
+    # 某些受管环境里 pip 的 HTTP 缓存写入会挂起（实测同一命令加与不加：
+    # 793s 无输出 vs 58s 成功），禁用缓存是决定性的差异。
+    base = [str(py), "-m", "pip", "install", "--no-cache-dir"]
+    target = str(REPO)
+    flag = "-e" if editable else ""
+    if extra:
+        target = f"{REPO}{extra}"
+    has_hatchling = run([*base, "hatchling", "-q"], check=False, env=env) == 0
+    if has_hatchling:
+        cmd = [*base, "--no-build-isolation"]
+        if flag:
+            cmd.append(flag)
+        cmd.append(target)
+        if run(cmd, check=False, env=env) == 0:
+            return
+        print("[..] 无隔离安装失败，回退到默认构建方式")
+    cmd = list(base)
+    if flag:
+        cmd.append(flag)
+    cmd.append(target)
+    run(cmd, env=env)
 
 
 def verify() -> bool:
@@ -154,19 +209,31 @@ def main() -> int:
     ap.add_argument("--check", action="store_true", help="只做自检，不安装")
     ap.add_argument("--force", action="store_true", help="删除已有 .venv 后重建")
     ap.add_argument("--dev", action="store_true", help="同时安装开发依赖（pytest 等）")
+    ap.add_argument(
+        "--editable", action="store_true",
+        help="editable 安装（改源码即时生效；开发用，普通使用不建议）",
+    )
+    ap.add_argument(
+        "--mirror",
+        metavar="URL",
+        default=None,
+        help="PyPI 镜像地址，例如 https://pypi.tuna.tsinghua.edu.cn/simple",
+    )
     args = ap.parse_args()
 
     print("=" * 68)
     print("jlink-insight-mcp bootstrap")
     print(f"仓库目录: {REPO}")
+    if args.mirror:
+        print(f"PyPI 镜像: {args.mirror}")
     print("=" * 68)
 
     check_python()
 
     if not args.check:
         create_venv(args.force)
-        print("[..] 安装依赖（editable 模式）")
-        install("[dev]" if args.dev else "")
+        print("[..] 安装依赖")
+        install("[dev]" if args.dev else "", mirror=args.mirror, editable=args.editable)
         print("[OK] 依赖安装完成")
 
     print("[..] 环境自检")
