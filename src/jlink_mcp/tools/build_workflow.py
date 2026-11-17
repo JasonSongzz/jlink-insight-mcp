@@ -531,8 +531,10 @@ def _preset_names(presets: dict[str, Any] | None, kind: str) -> list[str]:
 # ---------------------------------------------------------------------------
 
 # 常见 host 测试驱动脚本位置（相对工程根目录）。
+# 最后一项覆盖 Tests/host/ 布局（工程级测试目录独立于 Application 的工程）。
 _HOST_TEST_SCRIPTS = (
     "Tests/run_host_tests.py",
+    "Tests/host/run_host_tests.py",
     "tests/run_host_tests.py",
     "test/run_host_tests.py",
     "scripts/run_host_tests.py",
@@ -545,6 +547,22 @@ _HOST_CC_CANDIDATES = ("gcc", "clang", "cc")
 def _python_exe() -> str:
     """当前 MCP 服务所用的 Python / Python running this MCP server."""
     return sys.executable or shutil.which("python") or "python"
+
+
+def _host_test_root(root: Path, build_cfg: dict[str, Any]) -> Path:
+    """Directory to search for the host test driver / host 测试搜索根目录.
+
+    默认与工程根相同。``build.host_test_project_root`` 允许指向父目录，用于
+    ``04_Software/{Application,Bootloader,Tests}`` 这类测试目录独立于 Application
+    的布局。
+    """
+    configured = build_cfg.get("host_test_project_root")
+    if not configured:
+        return root
+    candidate = (root / str(configured)).expanduser().resolve()
+    if not candidate.is_dir():
+        raise ValueError(f"build.host_test_project_root not found: {candidate}")
+    return candidate
 
 
 def _find_host_test_script(root: Path, build_cfg: dict[str, Any]) -> Path | None:
@@ -642,11 +660,16 @@ def host_test(
     if opt not in ("0", "3", "both"):
         raise ValueError("opt must be '0', '3' or 'both'")
 
-    driver = _inside(root, script) if script else _find_host_test_script(root, cfg)
+    # Host 测试可以有自己的根目录：有些工程把 Tests/ 放在 Application 的父目录
+    # （例如 04_Software/{Application,Bootloader,Tests}），此时 build 根是
+    # Application，而测试根是 04_Software。用 build.host_test_project_root 指定。
+    host_root = _host_test_root(root, cfg)
+
+    driver = _inside(host_root, script) if script else _find_host_test_script(host_root, cfg)
     if driver is None:
         raise ValueError(
             "Host test driver not found; set build.host_test_script or place "
-            f"one of {list(_HOST_TEST_SCRIPTS)}"
+            f"one of {list(_HOST_TEST_SCRIPTS)} under {host_root}"
         )
     if not driver.is_file():
         raise ValueError(f"Host test driver not found: {driver}")
@@ -664,7 +687,7 @@ def host_test(
         argv = [_python_exe(), str(driver), "--cc", compiler["path"], "--opt", level]
         if only:
             argv += ["--only", only]
-        r = _run(argv, root, dict(os.environ), timeout_s)
+        r = _run(argv, host_root, dict(os.environ), timeout_s)
         runs.append({
             "opt": level,
             "returncode": r["returncode"],
@@ -695,7 +718,7 @@ def host_test(
         isolation: list[dict[str, Any]] = []
         for name in names:
             argv = [_python_exe(), str(driver), "--cc", compiler["path"], "--opt", opts[0], "--only", name]
-            r = _run(argv, root, dict(os.environ), timeout_s)
+            r = _run(argv, host_root, dict(os.environ), timeout_s)
             isolation.append({
                 "name": name,
                 "ok": r["returncode"] == 0,
@@ -772,7 +795,7 @@ def build_status(project_path: str, preset: str = "Debug") -> dict[str, Any]:
     host_driver = None
     host_names: list[str] = []
     try:
-        host_driver = _find_host_test_script(root, cfg)
+        host_driver = _find_host_test_script(_host_test_root(root, cfg), cfg)
         if host_driver:
             host_names = _host_test_names(host_driver)
     except ValueError:
@@ -962,7 +985,7 @@ def workflow_pipeline(
         cfg = _build_cfg(root)
         driver = None
         try:
-            driver = _find_host_test_script(root, cfg)
+            driver = _find_host_test_script(_host_test_root(root, cfg), cfg)
         except ValueError as exc:
             stages.append({"name": "host_test", "skipped": True, "reason": str(exc)})
         if driver is None:
