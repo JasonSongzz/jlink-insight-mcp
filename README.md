@@ -2,7 +2,41 @@
 
 让 Claude / Codex 根据 STM32 工程的实际能力，自动烧录已编译固件、启动运行，并通过 J-Link、RTT、SystemView 获取运行证据与诊断反馈。
 
-当前版本 **0.2.0**，提供完整可安装源码与测试，尚未经真实开发板验证。
+当前版本 **0.3.0**，提供完整可安装源码与测试。
+
+## 安全边界 / Security boundary
+
+本服务的工具面面向 LLM 客户端，因此破坏性操作默认关闭，需要显式确认。
+Destructive operations are gated because the tool surface is driven by a
+language model:
+
+| 操作 | 闸门 |
+|---|---|
+| `deploy_project` / `workflow_pipeline(flash=True)` | `confirm=True` |
+| `start_firmware_watch`（持续自动烧录，最长 24h） | `confirm=True` |
+| `erase_flash`（整片擦除会连 Bootloader 一起抹掉） | `confirm=True` |
+| `gdb_batch(commands=...)` | 白名单：只放行调试类命令 |
+
+`gdb_batch` 具体限制：
+
+- 命令走**白名单**，`shell` / `compile` / `eval` / `interpreter-exec` /
+  `pipe` / `call` / `python` / `source` / `!cmd` 等一律拒绝；
+- 强制 `set may-call-functions off`，并拒绝 `print ... func()` 形式的表达式调用；
+- 强制 `-nx -nh`，不会读取工作目录或用户目录下的 `.gdbinit`。
+
+两个可选环境变量：
+
+| 变量 | 作用 | 默认 |
+|---|---|---|
+| `JLINK_MCP_EXPORT_ROOT` | `export_runtime_trace` 允许写入的根目录；此外只允许当前工作目录 | `~/jlink-mcp-exports` |
+| `JLINK_MCP_ALLOW_SECRET_ENV` | 设为 `1` 时才允许把 `*KEY*`/`*TOKEN*`/`*SECRET*` 命名的环境变量传给构建子进程 | 未设置（不转发） |
+
+`jlink-project.json` 是**可提交到版本库**的文件，因此 `build.env_allow` 与
+`build.env` 都无法单独解锁凭据类变量——只有操作者设置
+`JLINK_MCP_ALLOW_SECRET_ENV=1` 才生效。
+
+`program_flash` / `write_memory` / `write_register` 是底层调试原语，不做内容级
+校验（它们按设计可写任意地址），只应在确知目标时使用。
 
 ## 新机器 6 步检查清单
 

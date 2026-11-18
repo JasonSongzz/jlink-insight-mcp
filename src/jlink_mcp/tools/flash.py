@@ -14,7 +14,8 @@ from ..utils import logger, human_readable_size
 def erase_flash(
     start_address: Optional[int] = None,
     end_address: Optional[int] = None,
-    chip_erase: bool = False
+    chip_erase: bool = False,
+    confirm: bool = False
 ) -> Dict[str, Any]:
     """擦除 Flash.
 
@@ -30,6 +31,16 @@ def erase_flash(
         - bytes_erased: 擦除的字节数
         - message: 状态信息
     """
+    # Erasing is irreversible. A chip erase also removes the bootloader, so the
+    # device could only be recovered over SWD afterwards -- never via OTA.
+    if not confirm:
+        raise JLinkMCPError(
+            JLinkErrorCode.INVALID_PARAMETER,
+            "erase_flash is irreversible"
+            + (" (chip_erase wipes the bootloader too)" if chip_erase else "")
+            + "; pass confirm=True to proceed",
+        )
+
     try:
         jlink = jlink_manager.get_jlink()
 

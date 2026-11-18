@@ -586,19 +586,23 @@ async def write_register(register_name: str, value: int) -> dict[str, Any]:
 
 @mcp.tool()
 async def erase_flash(
-    start_address: int | None = None, end_address: int | None = None, chip_erase: bool = False
+    start_address: int | None = None,
+    end_address: int | None = None,
+    chip_erase: bool = False,
+    confirm: bool = False,
 ) -> dict[str, Any]:
     """Erase Flash / 擦除 Flash.
 
     Args:
         start_address: Start address (optional) / 起始地址（可选）
         end_address: End address (optional) / 结束地址（可选）
-        chip_erase: Whether to perform chip erase / 是否整片擦除
+        chip_erase: Whether to perform chip erase (wipes the bootloader too) / 是否整片擦除（会连 Bootloader 一起抹掉）
+        confirm: Required: erasing is irreversible / 必填：擦除不可逆
 
     Returns:
         Erase result / 擦除结果
     """
-    return _erase_flash(start_address, end_address, chip_erase)
+    return _erase_flash(start_address, end_address, chip_erase, confirm)
 
 
 @mcp.tool()

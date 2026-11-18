@@ -35,10 +35,14 @@ dependencies = [
     "numpy>=1.26.0",
     "pydantic>=2.12.0",
     "pydantic-settings>=2.12.0",
-    "openai>=1.0.0",  # For semantic tool discovery embeddings
+    # NOTE: openai is NOT a hard dependency. Semantic tool discovery is optional;
+    # install the "semantic" extra to enable it.
 ]
 
 [project.optional-dependencies]
+# Optional semantic tool discovery (embeddings). Without it the semantic_* tools
+# report that no API key / client is configured instead of failing to import.
+semantic = ["openai>=1.0.0"]
 dev = [
     "pytest>=8.0.0",
     "pytest-benchmark>=4.0.0",
