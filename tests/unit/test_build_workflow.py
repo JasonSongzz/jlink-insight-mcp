@@ -528,3 +528,26 @@ def test_gdb_argv_skips_user_init_files() -> None:
     """-nx / -nh 必须存在：工作目录下的 .gdbinit 就是任意主机代码执行。"""
     assert "-nx" in bw._GDB_SAFE_FLAGS
     assert "-nh" in bw._GDB_SAFE_FLAGS
+
+
+def test_preset_variants_prefers_requested_preset() -> None:
+    """显式 preset 必须优先于 manifest 写死的 build/<other>/ 路径。
+
+    Both workspace manifests hardcode build/Debug/...; without this, building
+    Release reported the *Debug* artifact's sha256 and size in its evidence.
+    """
+    have = bw._preset_variants("build/Debug/app.hex", "Release")
+    assert have[0] == "build/Release/app.hex"
+    assert "build/Debug/app.hex" in have
+
+    same = bw._preset_variants("build/Debug/app.hex", "Debug")
+    assert same == ["build/Debug/app.hex"]
+
+
+def test_preset_variants_expands_placeholder() -> None:
+    assert bw._preset_variants("build/{preset}/app.hex", "Release") == ["build/Release/app.hex"]
+    assert bw._preset_variants("fw/{preset}.bin", "Debug") == ["fw/Debug.bin"]
+
+
+def test_preset_variants_leaves_plain_paths_alone() -> None:
+    assert bw._preset_variants("firmware.hex", "Release") == ["firmware.hex"]

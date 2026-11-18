@@ -503,14 +503,39 @@ def _inside(root: Path, path: str | Path) -> Path:
     return p
 
 
+_BUILD_PRESET_SCOPE = re.compile(r"^(?P<head>.*?build/)(?P<preset>[^/\\]+)/(?P<tail>.+)$")
+
+
+def _preset_variants(path_str: str, preset: str) -> list[str]:
+    """Ordered candidates for a manifest path, requested preset first.
+
+    A manifest that hardcodes "build/Debug/bootloader.hex" must not silently win
+    over an explicit preset="Release" request: the returned sha256/size would
+    then describe a different artifact than the one just built.
+    """
+    expanded = path_str.replace("{preset}", preset)
+    variants: list[str] = []
+    m = _BUILD_PRESET_SCOPE.match(expanded)
+    if m and m.group("preset") != preset:
+        variants.append(m.group("head") + preset + "/" + m.group("tail"))
+    variants.append(expanded)
+    return variants
+
+
 def _find_firmware(root: Path, build_cfg: dict[str, Any], preset: str) -> Path:
     """Locate ELF / 定位 ELF：manifest 优先，其次 build/<preset>/*.elf。"""
     candidates: list[str] = []
+    raw: list[str] = []
     if build_cfg.get("firmware"):
-        candidates.append(str(build_cfg["firmware"]))
+        raw.append(str(build_cfg["firmware"]))
     manifest_fw = _read_manifest(root).get("firmware")
     if manifest_fw:
-        candidates.append(str(manifest_fw))
+        raw.append(str(manifest_fw))
+    candidates: list[str] = []
+    for c in raw:
+        for v in _preset_variants(c, preset):
+            if v not in candidates:
+                candidates.append(v)
     for c in candidates:
         p = _inside(root, c)
         if p.is_file():
