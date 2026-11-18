@@ -8,6 +8,7 @@ from __future__ import annotations
 import codecs
 import copy
 import json
+import os
 import re
 import threading
 import time
@@ -27,6 +28,15 @@ LOG_PATTERN = re.compile(r"\b(assert(?:ion)?(?: failed)?|hardfault|stack overflo
 def _rtt_name(descriptor: Any) -> str:
     value = descriptor.acName
     return value.decode("utf-8", errors="replace") if isinstance(value, bytes) else str(value)
+
+
+def _is_within(path: Path, root: Path) -> bool:
+    """True when path is root or lives under it / 路径是否位于根目录内."""
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
 
 
 class RuntimeMonitor:
@@ -384,6 +394,21 @@ class RuntimeMonitor:
     def export(self, output_path: str) -> dict[str, Any]:
         """Export raw RTT recording and report / 导出原始 RTT 流和报告."""
         path = Path(output_path).expanduser().resolve()
+        # Constrain the destination: an LLM-driven MCP client could otherwise
+        # write into arbitrary absolute paths (system dirs, network shares).
+        # Allowed: $JLINK_MCP_EXPORT_ROOT (default ~/jlink-mcp-exports) and CWD.
+        _raw_root = os.environ.get("JLINK_MCP_EXPORT_ROOT", "").strip()
+        _allowed_roots = [
+            Path(_raw_root).expanduser().resolve() if _raw_root
+            else (Path.home() / "jlink-mcp-exports"),
+            Path.cwd().resolve(),
+        ]
+        if not any(_is_within(path, _r) for _r in _allowed_roots):
+            raise ValueError(
+                "export path must be inside an allowed root ("
+                + ", ".join(str(_r) for _r in _allowed_roots)
+                + "); set JLINK_MCP_EXPORT_ROOT to permit another location"
+            )
         with self._mutex:
             raw = bytes(self._raw)
             report = self.status()

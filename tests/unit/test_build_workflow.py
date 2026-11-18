@@ -350,10 +350,31 @@ def test_build_env_strips_secret_variables(project: Path, monkeypatch) -> None:
     assert env["HARMLESS_VAR"] == "ok"
 
 
-def test_build_env_can_allowlist_secret(project: Path, monkeypatch) -> None:
+def test_build_env_manifest_cannot_allowlist_secret(project: Path, monkeypatch) -> None:
+    """A committed manifest must not be able to forward credentials.
+
+    env_allow names the variable, but only the operator can opt in via
+    JLINK_MCP_ALLOW_SECRET_ENV=1.
+    """
+    monkeypatch.delenv("JLINK_MCP_ALLOW_SECRET_ENV", raising=False)
+    monkeypatch.setenv("MY_CUSTOM_TOKEN", "v")
+    env = bw._build_env({"tools": {}}, {"env_allow": ["MY_CUSTOM_TOKEN"]})
+    assert "MY_CUSTOM_TOKEN" not in env
+
+
+def test_build_env_operator_can_opt_in_to_secret(project: Path, monkeypatch) -> None:
+    """With explicit operator opt-in the credential is forwarded again."""
+    monkeypatch.setenv("JLINK_MCP_ALLOW_SECRET_ENV", "1")
     monkeypatch.setenv("MY_CUSTOM_TOKEN", "v")
     env = bw._build_env({"tools": {}}, {"env_allow": ["MY_CUSTOM_TOKEN"]})
     assert env["MY_CUSTOM_TOKEN"] == "v"
+
+
+def test_build_env_inline_value_cannot_inject_secret(project: Path, monkeypatch) -> None:
+    """build.env values are likewise blocked from naming a credential."""
+    monkeypatch.delenv("JLINK_MCP_ALLOW_SECRET_ENV", raising=False)
+    env = bw._build_env({"tools": {}}, {"env": {"SOME_API_KEY": "leak"}})
+    assert "SOME_API_KEY" not in env
 
 
 def test_build_env_manifest_values_override(project: Path, monkeypatch) -> None:
@@ -412,3 +433,65 @@ def test_serialized_lock_blocks_concurrent_builds(tmp_path: Path) -> None:
     assert active["max"] == 1
 
 
+@pytest.mark.parametrize(
+    "command",
+    [
+        "bt",
+        "info registers",
+        "set pagination off",
+        "target remote :2331",
+        "monitor reset halt",
+        "x/16wx 0x20000000",
+        "x 0x20000000",
+        "disassemble /m main",
+        "print $pc",
+        "p/x $lr",
+        "thread apply all bt",
+        "break main",
+        "continue",
+        "finish",
+    ],
+)
+def test_gdb_command_allowed(command: str) -> None:
+    """正常调试命令必须放行 / Normal debugging commands must pass."""
+    assert bw._gdb_command_allowed(command) is True
+    assert bw._gdb_has_function_call(command) is False
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "shell rm -rf /",
+        'eval "shell id"',
+        "compile code int main(){} end",
+        'interpreter-exec console "shell id"',
+        "pipe date | shell cat",
+        'call system("id")',
+        'p (int)system("id")',
+        "def foo",
+        "source /etc/passwd",
+        "dump binary memory /tmp/x 0 1",
+        "restore /tmp/x binary 0",
+        "set logging on",
+        "python print(1)",
+        "!ls",
+        "d",
+        "sh",
+        "py",
+        "define hook-run",
+        "while 1",
+    ],
+)
+def test_gdb_command_denied(command: str) -> None:
+    """主机命令执行 / 文件读写 / 表达式函数调用必须拒绝。
+
+    Allow-list (not deny-list) because GDB's surface is too large to enumerate:
+    eval / compile / interpreter-exec / pipe / call all escaped the old list.
+    """
+    assert bw._gdb_command_allowed(command) is False or bw._gdb_has_function_call(command) is True
+
+
+def test_gdb_argv_skips_user_init_files() -> None:
+    """-nx / -nh 必须存在：工作目录下的 .gdbinit 就是任意主机代码执行。"""
+    assert "-nx" in bw._GDB_SAFE_FLAGS
+    assert "-nh" in bw._GDB_SAFE_FLAGS

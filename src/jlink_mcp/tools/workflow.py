@@ -231,11 +231,21 @@ def start_firmware_watch(
     serial_number: str | None = None,
     duration_s: int = 3600,
     deploy_initial: bool = False,
+    confirm: bool = False,
 ) -> dict[str, Any]:
     """Watch build output and deploy stable changes / 监听编译产物并自动部署稳定版本."""
     from ..firmware_watch import firmware_watch
 
-    return firmware_watch.start(project_path, firmware_path, chip_name, serial_number, duration_s, deploy_initial)
+    # Repeated hardware writes require explicit confirmation, matching
+    # deploy_project / workflow_pipeline. Otherwise a rebuild loop could flash
+    # the board unattended for up to 24 hours.
+    if not confirm:
+        raise ValueError(
+            "start_firmware_watch writes Flash repeatedly; pass confirm=True to enable"
+        )
+    return firmware_watch.start(
+        project_path, firmware_path, chip_name, serial_number, duration_s, deploy_initial
+    )
 
 
 @_response

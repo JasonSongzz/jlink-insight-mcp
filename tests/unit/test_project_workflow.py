@@ -215,3 +215,51 @@ def test_all_segments_are_verified_after_all_downloads():
     assert max(i for i, name in enumerate(calls) if name == "flash") < min(
         i for i, name in enumerate(calls) if name == "memory_read8"
     )
+
+
+def test_inspect_project_uses_debug_elf_for_hex_firmware(tmp_path: Path) -> None:
+    """HEX 固件无符号表时回退到 manifest.debug_elf 做能力探测。
+
+    The flash artifact is a HEX (it carries the MCUboot header), but capability
+    detection needs symbols, so the manifest's debug_elf must be used instead of
+    reporting every capability as False.
+    """
+    make_elf(
+        tmp_path / "build" / "Debug" / "app.elf",
+        {"_SEGGER_RTT": 0x20000100, "vTaskStartScheduler": 0x08001001},
+    )
+    (tmp_path / "build" / "Debug" / "app.hex").write_text(":00000001FF\n", encoding="utf-8")
+    (tmp_path / "jlink-project.json").write_text(
+        json.dumps(
+            {
+                "chip_name": "STM32U575RG",
+                "firmware": "build/Debug/app.hex",
+                "debug_elf": "build/Debug/app.elf",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    data = inspect_project_data(str(tmp_path))
+
+    assert data["firmware"]["relative_path"] == "build/Debug/app.hex"
+    assert data["evidence"]["symbols_source"] == "build/Debug/app.elf"
+    assert data["capabilities"]["rtt_candidate"] is True
+    assert not any("ELF symbols unavailable" in w for w in data["warnings"])
+
+
+def test_inspect_project_without_debug_elf_warns_and_degrades(tmp_path: Path) -> None:
+    """没有 debug_elf 时不得凭空声称能力，必须保留警告。"""
+    hexdir = tmp_path / "build" / "Debug"
+    hexdir.mkdir(parents=True)
+    (hexdir / "app.hex").write_text(":00000001FF\n", encoding="utf-8")
+    (tmp_path / "jlink-project.json").write_text(
+        json.dumps({"chip_name": "STM32U575RG", "firmware": "build/Debug/app.hex"}),
+        encoding="utf-8",
+    )
+
+    data = inspect_project_data(str(tmp_path))
+
+    assert data["evidence"]["symbols_source"] is None
+    assert data["capabilities"]["rtt_candidate"] is False
+    assert any("ELF symbols unavailable" in w for w in data["warnings"])

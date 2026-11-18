@@ -232,8 +232,11 @@ def test_auto_falls_back_when_rtt_initialization_unavailable(monkeypatch):
         monitor.stop()
 
 
-def test_export_preserves_raw_bytes_and_report(tmp_path):
+def test_export_preserves_raw_bytes_and_report(tmp_path, monkeypatch):
     import json
+
+    # The export path is constrained to an allow-list; point it at tmp_path.
+    monkeypatch.setenv("JLINK_MCP_EXPORT_ROOT", str(tmp_path))
 
     monitor = RuntimeMonitor()
     monitor._raw.extend(trace())
@@ -243,3 +246,18 @@ def test_export_preserves_raw_bytes_and_report(tmp_path):
     assert output["bytes"] == len(trace())
     with pytest.raises(ValueError, match="already exists"):
         monitor.export(str(tmp_path / "capture.svraw"))
+
+
+def test_export_rejects_path_outside_allowed_root(tmp_path, monkeypatch):
+    """An LLM-supplied absolute path outside the allowed roots must be refused."""
+    allowed = tmp_path / "allowed"
+    allowed.mkdir()
+    monkeypatch.setenv("JLINK_MCP_EXPORT_ROOT", str(allowed))
+
+    monitor = RuntimeMonitor()
+    monitor._raw.extend(trace())
+
+    outside = tmp_path / "elsewhere" / "capture.svraw"
+    with pytest.raises(ValueError, match="allowed root"):
+        monitor.export(str(outside))
+    assert not outside.exists()

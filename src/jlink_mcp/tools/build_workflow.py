@@ -49,11 +49,157 @@ _SECRET_NAME = re.compile(r"KEY|PASSWORD|SECRET|TOKEN", re.IGNORECASE)
 _PROJECT_LOCKS: dict[str, threading.Lock] = {}
 _PROJECT_LOCKS_GUARD = threading.Lock()
 
-# GDB 中可以在**宿主机**上执行任意代码/读写的命令：直接拒绝，而不是静默丢弃。
-_DANGEROUS_GDB_PREFIXES = (
-    "shell", "python", "source", "!", "dump", "restore", "define", "while",
-    "set logging", "set debuginfod",
+# GDB command allow-list / GDB 命令白名单
+#
+# WHY ALLOW-LIST INSTEAD OF DENY-LIST / 为什么用白名单而不是黑名单
+# ------------------------------------------------------------------
+# GDB's command surface is far too large to enumerate safely. A deny-list only
+# blocks the commands someone thought of. These all escaped the previous
+# deny-list and each one runs host code or touches arbitrary files:
+#   eval "shell ..."            -> eval forwards to any command
+#   compile code ... end        -> compiles and runs arbitrary C on the HOST
+#   interpreter-exec console .. -> MI bridge to any CLI command
+#   pipe <cmd> | shell ...      -> GDB supports pipes
+#   call system("...")          -> calls a host/target function
+#   p (int)system("...")        -> expression evaluation can invoke calls
+#   def / d e f i n e           -> GDB accepts unambiguous abbreviations
+#
+# So this list enumerates what IS allowed; anything else is rejected.
+# Match rule: exact, or "<entry> " prefix, or "<entry>(" prefix.
+_ALLOWED_GDB_COMMANDS = (
+    # connection / session setup (used by the generated default sequence)
+    "set pagination",
+    "set confirm",
+    "set print",
+    "set width",
+    "set height",
+    "set listsize",
+    "set disassembly-flavor",
+    "target remote",
+    "target extended-remote",
+    "monitor reset",
+    "monitor halt",
+    "monitor go",
+    "monitor sleep",
+    "monitor speed",
+    # read-only inspection
+    "bt",
+    "backtrace",
+    "where",
+    "info",
+    "frame",
+    "thread",
+    "disassemble",
+    "list",
+    "print",
+    "ptype",
+    "whatis",
+    "show",
+    "help",
+    "maintenance info",
+    # controlled execution / breakpoints
+    "break",
+    "tbreak",
+    "delete breakpoints",
+    "disable",
+    "enable",
+    "clear",
+    "continue",
+    "next",
+    "step",
+    "finish",
+    "until",
+    "detach",
+    "quit",
 )
+
+# Memory/examine forms are allowed but need their own handling because they start
+# with "x" followed by a count/format specifier (x/16wx, x 0x20000000).
+# Leading command names derived from the allow-list / 由白名单派生的命令名集合
+_ALLOWED_GDB_NAMES = {
+    e.split(" ", 1)[0] for e in _ALLOWED_GDB_COMMANDS
+} | {"x", "p"}
+
+_ALLOWED_GDB_EXAMINE_PREFIX = "x"
+
+# GDB options that make it load or execute something we did not ask for.
+# -nx / -nh are mandatory: a .gdbinit in the working directory is arbitrary
+# host code execution.
+_GDB_FORBIDDEN_FLAGS = ("-x", "-iex", "-ex-script", "--command", "--init-command")
+
+# Flags this tool sets itself.
+_GDB_SAFE_FLAGS = ("-q", "-batch", "-nx", "-nh")
+
+
+# Expressions may not invoke functions. GDB's `set may-call-functions` is forced
+# off below, but reject call syntax as well so an injection attempt is reported
+# explicitly instead of silently evaluating to an error inside GDB.
+_CALL_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\s*\(")
+
+
+def _gdb_has_function_call(command: str) -> bool:
+    """True when an expression command tries to call a function / 是否含函数调用."""
+    low = " ".join(command.strip().lower().split())
+    head = low.split("/", 1)[0]
+    name = head.split(" ", 1)[0].strip()
+    # Only expression/evaluate commands can embed calls worth blocking; the
+    # allow-list already rejects shell/eval/compile/python.
+    if name not in {"p", "print", "x", "call", "whatis", "ptype"}:
+        return False
+    # Allow the harmless cast form "(type)" but block "ident(" calls.
+    body = low.split(" ", 1)[1] if " " in low else ""
+    # strip format suffix remnants like "/x"
+    if "/" in body:
+        body = body.split("/", 1)[-1]
+    return bool(_CALL_PATTERN.search(body))
+
+
+def _gdb_command_allowed(command: str) -> bool:
+    """Return True when a GDB command is on the allow-list / 命令是否在白名单内.
+
+    Matching strategy: take the command's leading NAME (text before the first
+    "/" format suffix and before the first space), then require that name to be
+    one of the allow-listed names. This keeps "p/x $lr", "print/x $pc" and
+    "x/16wx addr" working while rejecting "py", "sh", "!" and friends.
+    """
+    low = " ".join(command.strip().lower().split())
+    if not low:
+        return False
+
+    # GDB command name = leading token, minus any /format suffix.
+    #   "p/x $lr"          -> "p"
+    #   "print/x $pc"      -> "print"
+    #   "x/16wx addr"      -> "x"
+    #   "info registers"   -> "info"
+    #   "monitor reset halt" -> "monitor"
+    head = low.split("/", 1)[0]
+    name = head.split(" ", 1)[0].strip()
+    if not name:
+        return False
+
+    if name not in _ALLOWED_GDB_NAMES:
+        return False
+
+    # Multi-word entries ("set pagination", "target remote", "monitor reset")
+    # are matched as a prefix of the whole command so "set logging" stays denied
+    # even though "set" itself is allowed.
+    for entry in _ALLOWED_GDB_COMMANDS:
+        if " " not in entry:
+            continue
+        if low == entry or low.startswith(entry + " ") or low.startswith(entry + "("):
+            return True
+        # allow format suffix on multi-word entries, e.g. "disassemble/m main"
+        if low.startswith(entry.replace(" ", "/", 1)):
+            return True
+
+    # If the name is allow-listed and no multi-word constraint applies to it,
+    # accept it (covers "bt", "p", "print", "x", "info", ...).
+    constrained = {e.split(" ", 1)[0] for e in _ALLOWED_GDB_COMMANDS if " " in e}
+    if name in constrained:
+        # The name only appears in the list with a specific argument form, and
+        # none of those matched, so reject (e.g. "set logging" vs "set").
+        return False
+    return True
 
 # ---------------------------------------------------------------------------
 # Response wrapper / 统一响应包装
@@ -491,18 +637,34 @@ def _build_env(discovery: dict[str, Any], build_cfg: dict[str, Any]) -> dict[str
     """
     allow = build_cfg.get("env_allow", [])
     allow_set = {str(x) for x in allow} if isinstance(allow, list) else set()
+
+    # Credentials can be re-enabled ONLY by the operator, never by a manifest.
+    # A committed jlink-project.json must not be able to forward OPENAI_API_KEY,
+    # GITHUB_TOKEN etc. to cmake/ninja/test subprocesses.
+    allow_secret_env = os.environ.get("JLINK_MCP_ALLOW_SECRET_ENV", "").strip() == "1"
+
     env: dict[str, str] = {}
     for k, v in os.environ.items():
         if k.startswith("DSH_"):
             continue
-        if _SECRET_NAME.search(k) and k not in allow_set:
-            continue
+        if _SECRET_NAME.search(k):
+            if not allow_secret_env:
+                continue
+            if k not in allow_set:
+                continue
         env[k] = v
     extra = build_cfg.get("env", {})
     if isinstance(extra, dict):
         for k, v in extra.items():
-            if isinstance(k, str) and isinstance(v, (str, int, float)):
-                env[k] = str(v)
+            if not isinstance(k, str) or not isinstance(v, (str, int, float)):
+                continue
+            # Same rule for inline values: a manifest cannot name a credential.
+            if _SECRET_NAME.search(k):
+                if not allow_secret_env:
+                    continue
+                if k not in allow_set:
+                    continue
+            env[k] = str(v)
     arm_gcc = discovery["tools"].get("arm_gcc")
     if arm_gcc:
         bindir = str(Path(arm_gcc["path"]).parent)
@@ -1129,14 +1291,21 @@ def gdb_batch(
         "bt",
         "info registers",
     ])
+    # Hardening: disallow function calls from expressions. Must precede any
+    # user-supplied command so a crafted "-ex" cannot re-enable it.
+    cmds = ["set may-call-functions off"] + cmds
     # 拒绝而非静默丢弃：调用方必须知道某条命令没有执行
+    # 拒绝任何不在白名单内的命令：未知即拒绝，而不是静默跳过
     for c in cmds:
-        low = c.strip().lower()
-        for bad in _DANGEROUS_GDB_PREFIXES:
-            if low == bad or low.startswith(bad + " ") or low.startswith(bad + "("):
-                raise ValueError(
-                    f"GDB command not allowed (host code execution / file IO): {c!r}"
-                )
+        if _gdb_has_function_call(c):
+            raise ValueError(
+                "GDB expression may not call functions (may-call-functions is off): "
+                + repr(c)
+            )
+        if not _gdb_command_allowed(c):
+            raise ValueError(
+                "GDB command not allowed (host code execution / file IO): " + repr(c)
+            )
 
     # 与其它硬件操作互斥
     from ..hardware_access import hardware_access
@@ -1176,7 +1345,9 @@ def gdb_batch(
             if not _port_open(port):
                 raise RuntimeError("J-Link GDB Server did not open the port in time")
 
-        gdb_argv = [gdb["path"], "-q", "-batch"]
+        # -nx / -nh keep GDB from reading .gdbinit / .gdb_history, which would be
+        # arbitrary host code execution from the working directory.
+        gdb_argv = [gdb["path"], *_GDB_SAFE_FLAGS]
         for c in cmds:
             gdb_argv += ["-ex", c]
         gdb_argv.append(str(elf))

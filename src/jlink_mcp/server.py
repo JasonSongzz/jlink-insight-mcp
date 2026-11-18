@@ -307,14 +307,17 @@ async def start_firmware_watch(
     serial_number: str | None = None,
     duration_s: int = 3600,
     deploy_initial: bool = False,
+    confirm: bool = False,
 ) -> dict[str, Any]:
     """Watch a compiled artifact, auto flash stable changes, run and monitor / 监听编译产物并自动烧录监控.
 
     Explicitly enables repeated hardware writes for this selected artifact. Waits for 1 second stability.
     One deployment attempt per SHA256. Does not execute builds or modify the firmware source.
+    Requires confirm=True: this tool writes Flash repeatedly without further prompts.
     """
     return _workflow.start_firmware_watch(
-        project_path, firmware_path, chip_name, serial_number, duration_s, deploy_initial
+        project_path, firmware_path, chip_name, serial_number, duration_s,
+        deploy_initial, confirm=confirm,
     )
 
 

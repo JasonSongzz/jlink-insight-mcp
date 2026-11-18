@@ -50,3 +50,17 @@ def test_watcher_start_without_initial_deployment(tmp_path, monkeypatch):
     finally:
         watch.stop()
     deploy.assert_not_called()
+
+
+def test_watch_requires_confirm(tmp_path):
+    """安全闸：start_firmware_watch 会持续写 Flash，没 confirm 必须拒绝。
+
+    This tool re-flashes on every artifact change for up to 24h with no further
+    prompt, so it needs the same explicit confirmation as deploy_project.
+    """
+    (tmp_path / "firmware.bin").write_bytes(b"fw")
+    r = workflow.start_firmware_watch(str(tmp_path), "firmware.bin", confirm=False)
+    assert r["success"] is False
+    assert "confirm" in r["error"]["description"].lower()
+    # Nothing may have been started.
+    assert workflow.get_firmware_watch_status()["data"]["state"] in ("idle", "stopped")

@@ -128,9 +128,33 @@ def inspect_project_data(
         raise ValueError(f"Firmware does not exist: {firmware}")
     symbols = {}
     elf_info = None
+    symbols_source = None
     if firmware and firmware.suffix.lower() in (".elf", ".axf"):
         elf_info = read_elf(firmware)
         symbols = elf_info["symbols"]
+        symbols_source = rel(firmware)
+    if not symbols:
+        # HEX/BIN carry no symbol table. The manifest may point at the debug ELF
+        # for exactly this reason; use it for capability detection only. The
+        # flash artifact stays `firmware`.
+        dbg = manifest.get("debug_elf")
+        if dbg:
+            try:
+                dbg_path = _inside(root, dbg)
+            except ValueError:
+                warnings.append("manifest.debug_elf points outside the project; ignored")
+                dbg_path = None
+            if dbg_path is not None:
+                if dbg_path.is_file() and dbg_path.suffix.lower() in (".elf", ".axf"):
+                    try:
+                        dbg_info = read_elf(dbg_path)
+                        if dbg_info["symbols"]:
+                            symbols = dbg_info["symbols"]
+                            symbols_source = rel(dbg_path)
+                    except Exception as exc:  # noqa: BLE001 - report, do not fail
+                        warnings.append(f"manifest.debug_elf could not be parsed: {exc}")
+                elif not dbg_path.is_file():
+                    warnings.append(f"manifest.debug_elf does not exist: {rel(dbg_path)}")
     compile_files = set()
     for db in [p for p in files if p.name == "compile_commands.json"]:
         if db.stat().st_size > 16 * 1024 * 1024:
@@ -174,7 +198,10 @@ def inspect_project_data(
     # A candidate still requires runtime SysView channel + synchronization validation.
     sv_candidate = rtos_linked and rtt_linked and sv_linked and hooks_linked
     if not symbols:
-        warnings.append("ELF symbols unavailable; source presence does not prove linked/runtime capability")
+        warnings.append(
+            "ELF symbols unavailable; source presence does not prove linked/runtime "
+            "capability. Set manifest.debug_elf to the build ELF to enable it."
+        )
     if not chip:
         warnings.append("J-Link chip name unresolved; explicitly configure chip_name before deployment")
     if compile_files:
@@ -223,6 +250,7 @@ def inspect_project_data(
         "evidence": {
             "sources": source_evidence,
             "systemview_compilation_units": built_sv,
+            "symbols_source": symbols_source,
             "linked_symbols": {
                 key: symbols[key]
                 for key in (
