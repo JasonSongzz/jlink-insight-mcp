@@ -491,6 +491,39 @@ def test_gdb_command_denied(command: str) -> None:
     assert bw._gdb_command_allowed(command) is False or bw._gdb_has_function_call(command) is True
 
 
+@pytest.mark.parametrize(
+    "command",
+    [
+        "set may-call-functions on",
+        "set may-call-functions off",
+        "set may-call-functions",
+    ],
+)
+def test_user_cannot_set_may_call_functions(command: str) -> None:
+    """用户不得自行开关函数调用；该命令只能由可信前置注入。
+
+    If it were allow-listed, a caller could pass "set may-call-functions on" and
+    re-enable the host-call primitive we just closed.
+    """
+    assert bw._gdb_command_allowed(command) is False
+
+
+def test_trusted_prelude_is_injected_after_validation() -> None:
+    """可信前置命令必须在用户命令校验之后注入，否则会自我拦截。
+
+    Regression: the prelude used to be prepended before validation and every
+    gdb_batch call failed with "GDB command not allowed: 'set may-call-functions off'".
+    """
+    import inspect
+
+    source = inspect.getsource(bw.gdb_batch)
+    validate_at = source.find("for c in cmds:")
+    prelude_at = source.find('cmds = ["set may-call-functions off"] + cmds')
+    assert validate_at != -1, "validation loop missing"
+    assert prelude_at != -1, "trusted prelude missing"
+    assert prelude_at > validate_at, "prelude must be injected after validation"
+
+
 def test_gdb_argv_skips_user_init_files() -> None:
     """-nx / -nh 必须存在：工作目录下的 .gdbinit 就是任意主机代码执行。"""
     assert "-nx" in bw._GDB_SAFE_FLAGS

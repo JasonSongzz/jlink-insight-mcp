@@ -1291,9 +1291,6 @@ def gdb_batch(
         "bt",
         "info registers",
     ])
-    # Hardening: disallow function calls from expressions. Must precede any
-    # user-supplied command so a crafted "-ex" cannot re-enable it.
-    cmds = ["set may-call-functions off"] + cmds
     # 拒绝而非静默丢弃：调用方必须知道某条命令没有执行
     # 拒绝任何不在白名单内的命令：未知即拒绝，而不是静默跳过
     for c in cmds:
@@ -1306,6 +1303,11 @@ def gdb_batch(
             raise ValueError(
                 "GDB command not allowed (host code execution / file IO): " + repr(c)
             )
+
+    # Trusted prelude, added AFTER validation: these are our own commands, not
+    # user input, and "set may-call-functions" is deliberately absent from the
+    # allow-list so a user cannot re-enable function calls.
+    cmds = ["set may-call-functions off"] + cmds
 
     # 与其它硬件操作互斥
     from ..hardware_access import hardware_access
